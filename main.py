@@ -1,5 +1,5 @@
 from typing import Callable
-from program_state import ProgramState, flip_0
+from program_state import ProgramState
 import utils
 import torch
 

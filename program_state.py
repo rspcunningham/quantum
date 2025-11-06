@@ -61,14 +61,3 @@ class ProgramState:
 
         self.state_vector = v
         return self
-
-
-def flip_0(u: torch.Tensor) -> torch.Tensor:
-    k = 0
-    # v = U @ u
-
-    U = torch.eye(u.shape[0])
-    U[k, k] = -1
-    v = U @ u
-
-    return v
