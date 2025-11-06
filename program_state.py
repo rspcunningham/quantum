@@ -1,6 +1,7 @@
 import math
-import torch
 from typing import Callable
+
+import torch
 
 class ProgramState:
     state_vector: torch.Tensor
@@ -43,7 +44,7 @@ class ProgramState:
         fn: Callable[[torch.Tensor], torch.Tensor],
         *,
         atol: float = 1e-6
-    ) -> "ProgramState":
+    ) -> None:
         """Apply a function u -> v and mutate the state in place."""
         u = self.state_vector
         v = fn(u)
@@ -60,4 +61,3 @@ class ProgramState:
             raise ValueError("Transformation did not preserve norm. something is wrong!")
 
         self.state_vector = v
-        return self

@@ -1,6 +1,8 @@
+import math
+from re import search
 from typing import Callable
 from program_state import ProgramState
-import utils
+import time
 import torch
 
 # Transformations
@@ -26,25 +28,27 @@ def diffusion(s: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
 
 # Program Setup
 
-state = ProgramState.balanced(10)
-s = state.state_vector
-k = 0
+number_of_qubits = 4
+target_number = 15
 
-f_oracle = oracle(k)
+search_space = range(2**number_of_qubits)
+assert target_number in search_space, f"Target number {target_number} is not in search space {search_space}"
+
+state = ProgramState.balanced(number_of_qubits)
+s = state.state_vector
+
+f_oracle = oracle(target_number)
 f_diffusion = diffusion(s)
 
 # Program Execution
 
-utils.display(state)
+iterations = math.floor(math.sqrt(2**number_of_qubits))
 
-print("applying oracle")
-state.apply_transformation(f_oracle)
+for _ in range(iterations):
+    print("applying oracle")
+    state.apply_transformation(f_oracle)
 
-utils.display(state)
+    print("applying diffusion")
+    state.apply_transformation(f_diffusion)
 
-print("applying diffusion")
-state.apply_transformation(f_diffusion)
-
-utils.display(state)
-
-print(f"Sample: {state.state_vector.norm().item()}")
+print(f"Sample: {state.sample()}")
