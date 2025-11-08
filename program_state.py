@@ -7,6 +7,7 @@ class ProgramState:
     state_vector: torch.Tensor
     n_qbits: int
     dimensions: int
+    device: torch.device
 
     def __init__(self, state_vector: torch.Tensor):
         """
@@ -18,6 +19,8 @@ class ProgramState:
         self.state_vector = state_vector
         self.n_qbits = int(math.log2(state_vector.shape[0]))
         self.dimensions = 2 ** self.n_qbits
+        self.device = torch.device("mps")
+        self.state_vector = self.state_vector.to(self.device)
 
     @classmethod
     def balanced(cls, n_qbits: int):
