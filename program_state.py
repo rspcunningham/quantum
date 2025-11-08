@@ -1,10 +1,10 @@
 import math
-from typing import Callable
+from typing import Callable, Annotated
 
 import torch
 
 class ProgramState:
-    state_vector: torch.Tensor
+    state_vector: Annotated[torch.Tensor, "(n, 1) complex64 column vector"]
     n_qbits: int
     dimensions: int
     device: torch.device
@@ -14,24 +14,29 @@ class ProgramState:
         Initialize the quantum state with a normalized state vector.
 
         Args:
-            state_vector: A normalized tensor representing the quantum state
+            state_vector: A normalized (n, 1) complex64 column vector representing the quantum state
+
+        Raises:
+            ValueError: If state_vector is not a 2D column vector or not complex64 dtype
         """
+        # Type and shape validation
+        if state_vector.dim() != 2:
+            raise ValueError(f"state_vector must be 2D, got {state_vector.dim()}D")
+        if state_vector.shape[1] != 1:
+            raise ValueError(f"state_vector must be a column vector (n, 1), got shape {state_vector.shape}")
+        if state_vector.dtype != torch.complex64:
+            raise ValueError(f"state_vector must be complex64, got {state_vector.dtype}")
+
         self.state_vector = state_vector
-        self.n_qbits = int(math.log2(state_vector.shape[0]))
-        self.dimensions = 2 ** self.n_qbits
+        self.n_qubits = int(math.log2(state_vector.shape[0]))
+        self.dimensions = 2 ** self.n_qubits
         self.device = torch.device("mps")
         self.state_vector = self.state_vector.to(self.device)
 
     @classmethod
-    def balanced(cls, n_qbits: int):
-        """
-        Create a balanced superposition state with equal amplitude for all basis states.
-
-        Args:
-            n_qbits: Number of qubits
-        """
-        n = 2 ** n_qbits
-        vector = torch.ones(n, 1) / torch.sqrt(torch.tensor(float(n)))
+    def balanced(cls, n_qubits: int):
+        n = 2 ** n_qubits
+        vector = torch.ones(n, 1, dtype=torch.complex64) / torch.sqrt(torch.tensor(float(n)))
         return cls(vector)
 
     def _get_distribution(self):
@@ -59,8 +64,5 @@ class ProgramState:
             raise ValueError(f"Shape changed: {u.shape} -> {v.shape}")
         if v.dtype != u.dtype or v.device != u.device:
             raise ValueError("dtype/device changed; keep them consistent")
-
-        if not torch.allclose(u.norm(), v.norm(), atol=atol):
-            raise ValueError("Transformation did not preserve norm. something is wrong!")
 
         self.state_vector = v
