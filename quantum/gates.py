@@ -1,4 +1,5 @@
 import torch
+from typing import Callable
 
 __all__ = ["I", "H", "X", "Y", "Z", "RZ", "CX", "CZ", "CCX"]
 
@@ -33,28 +34,22 @@ Z = torch.tensor(
     dtype=torch.complex64)
 
 # rotate X gate
-def RX(theta: float) -> torch.Tensor:
-    half_theta = torch.tensor(theta / 2)
-    return torch.tensor(
-        [[torch.cos(half_theta), -1j * torch.sin(half_theta)],
-        [-1j * torch.sin(half_theta), torch.cos(half_theta)]],
-        dtype=torch.complex64)
+RX: Callable[[float], torch.Tensor] = lambda theta: torch.tensor(
+    [[torch.cos(torch.tensor(theta / 2)), -1j * torch.sin(torch.tensor(theta / 2))],
+    [-1j * torch.sin(torch.tensor(theta / 2)), torch.cos(torch.tensor(theta / 2))]],
+    dtype=torch.complex64)
 
 # rotate Y gate
-def RY(theta: float) -> torch.Tensor:
-    half_theta = torch.tensor(theta / 2)
-    return torch.tensor(
-        [[torch.cos(half_theta), -torch.sin(half_theta)],
-        [torch.sin(half_theta), torch.cos(half_theta)]],
-        dtype=torch.complex64)
+RY: Callable[[float], torch.Tensor] = lambda theta: torch.tensor(
+    [[torch.cos(torch.tensor(theta / 2)), -torch.sin(torch.tensor(theta / 2))],
+    [torch.sin(torch.tensor(theta / 2)), torch.cos(torch.tensor(theta / 2))]],
+    dtype=torch.complex64)
 
 # rotate Z gate
-def RZ(theta: float) -> torch.Tensor:
-    half_theta = torch.tensor(theta / 2)
-    return torch.tensor(
-        [[torch.cos(half_theta) - 1j * torch.sin(half_theta), 0],
-        [0, torch.cos(half_theta) + 1j * torch.sin(half_theta)]],
-        dtype=torch.complex64)
+RZ: Callable[[float], torch.Tensor] = lambda theta: torch.tensor(
+    [[torch.cos(torch.tensor(theta / 2)) - 1j * torch.sin(torch.tensor(theta / 2)), 0],
+    [0, torch.cos(torch.tensor(theta / 2)) + 1j * torch.sin(torch.tensor(theta / 2))]],
+    dtype=torch.complex64)
 
 # CNOT aka CX
 CX = torch.tensor(
