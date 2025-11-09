@@ -1,5 +1,7 @@
 import torch
 
+__all__ = ["I", "H", "X", "Y", "Z", "RZ", "CNOT"]
+
 # identity gate
 I = torch.tensor(
     [[1, 0],

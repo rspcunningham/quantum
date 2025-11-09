@@ -1,16 +1,6 @@
-from system import QuantumSystem
-from gates import *
+from quantum import QuantumSystem, gates
 
-state = QuantumSystem(3)
-
-print(state)
-
-# apply some gates
-state.apply_gate(H, [0])
-state.apply_gate(H, [2])
-state.apply_gate(RZ(15), [2])
-state.apply_gate(RZ(0.5), [1])
-state.apply_gate(RZ(0.2), [0])
-
-print(state)
-print(state.get_distribution())
+sys = QuantumSystem(2)
+print(sys)
+sys.apply_gate(gates.H, [0])
+print(sys)
