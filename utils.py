@@ -1,7 +1,7 @@
 from rich import print
 from rich.table import Table
 from rich.text import Text
-from program_state import ProgramState
+from system import QuantumSystem
 
 def format_basis(num: int, n_qubits):
     basis_bits = format(num, f"0{n_qubits}b")
