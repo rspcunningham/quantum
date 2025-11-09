@@ -5,7 +5,7 @@ state = QuantumSystem(3)
 
 print(state)
 
-# apply identity gate to state
+# apply some gates
 state.apply_gate(H, [0])
 state.apply_gate(H, [2])
 state.apply_gate(RZ(15), [2])
