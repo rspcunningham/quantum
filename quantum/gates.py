@@ -32,6 +32,7 @@ Z = torch.tensor(
      [0, -1]],
     dtype=torch.complex64)
 
+# rotate X gate
 def RX(theta: float) -> torch.Tensor:
     half_theta = torch.tensor(theta / 2)
     return torch.tensor(
@@ -39,6 +40,7 @@ def RX(theta: float) -> torch.Tensor:
         [-1j * torch.sin(half_theta), torch.cos(half_theta)]],
         dtype=torch.complex64)
 
+# rotate Y gate
 def RY(theta: float) -> torch.Tensor:
     half_theta = torch.tensor(theta / 2)
     return torch.tensor(
@@ -46,6 +48,7 @@ def RY(theta: float) -> torch.Tensor:
         [torch.sin(half_theta), torch.cos(half_theta)]],
         dtype=torch.complex64)
 
+# rotate Z gate
 def RZ(theta: float) -> torch.Tensor:
     half_theta = torch.tensor(theta / 2)
     return torch.tensor(
