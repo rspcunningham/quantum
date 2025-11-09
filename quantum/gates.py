@@ -32,6 +32,20 @@ Z = torch.tensor(
      [0, -1]],
     dtype=torch.complex64)
 
+def RX(theta: float) -> torch.Tensor:
+    half_theta = torch.tensor(theta / 2)
+    return torch.tensor(
+        [[torch.cos(half_theta), -1j * torch.sin(half_theta)],
+        [-1j * torch.sin(half_theta), torch.cos(half_theta)]],
+        dtype=torch.complex64)
+
+def RY(theta: float) -> torch.Tensor:
+    half_theta = torch.tensor(theta / 2)
+    return torch.tensor(
+        [[torch.cos(half_theta), -torch.sin(half_theta)],
+        [torch.sin(half_theta), torch.cos(half_theta)]],
+        dtype=torch.complex64)
+
 def RZ(theta: float) -> torch.Tensor:
     half_theta = torch.tensor(theta / 2)
     return torch.tensor(
