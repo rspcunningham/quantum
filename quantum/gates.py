@@ -1,7 +1,7 @@
 import torch
 from typing import Callable
 
-__all__ = ["I", "H", "X", "Y", "Z", "RZ", "CX", "CZ", "CCX"]
+__all__ = ["I", "H", "X", "Y", "Z", "RZ", "CX", "CZ", "CCX", "Gate"]
 
 # identity gate
 I = torch.tensor(
@@ -77,3 +77,12 @@ CCX = torch.tensor(
      [0, 0, 0, 0, 0, 0, 0, 1],
      [0, 0, 0, 0, 0, 0, 1, 0]],
     dtype=torch.complex64)
+
+
+class Gate:
+    tensor: torch.Tensor
+    targets: list[int]
+
+    def __init__(self, tensor: torch.Tensor, targets: list[int]):
+        self.tensor = tensor
+        self.targets = targets

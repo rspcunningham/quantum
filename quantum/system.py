@@ -4,8 +4,19 @@ from typing import Annotated, cast, override
 import torch
 import numpy as np
 import numpy.typing as npt
+from quantum.gates import Gate
 
-__all__ = ["QuantumSystem"]
+__all__ = ["QuantumSystem", "Circuit"]
+
+
+class Circuit:
+    n_qubits: int
+    gates: list[Gate]
+
+    def __init__(self, n_qubits: int, gates: list[Gate]):
+        self.n_qubits = n_qubits
+        self.gates = gates
+
 
 class QuantumSystem:
     state_vector: Annotated[torch.Tensor, "(n, 1) complex64 column vector"]
@@ -82,6 +93,10 @@ class QuantumSystem:
         norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
         assert torch.allclose(norm, torch.tensor(1.0, device=self.device), atol=1e-5), f"Norm drift: {norm}"
         self.state_vector = self.state_vector / norm
+
+    def apply_circuit(self, circuit: Circuit):
+        for gate in circuit.gates:
+            self.apply_gate(gate.tensor, gate.targets)
 
     def _gate_to_leftmost_matrix(self, gate: torch.Tensor, n_targets: int) -> torch.Tensor:
 
