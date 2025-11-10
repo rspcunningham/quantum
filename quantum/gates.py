@@ -15,6 +15,18 @@ H = (1 / torch.sqrt(torch.tensor(2.0))) * torch.tensor(
      [1, -1]],
     dtype=torch.complex64)
 
+# phase gate
+S = torch.tensor(
+    [[1, 0],
+     [0, 1j]],
+    dtype=torch.complex64)
+
+# pi/8 aka T gate
+T = torch.tensor(
+    [[1, 0],
+     [0, torch.exp(torch.tensor(1j * torch.pi / 4))]],
+    dtype=torch.complex64)
+
 # pauli-x gate
 X = torch.tensor(
     [[0, 1],
@@ -34,21 +46,22 @@ Z = torch.tensor(
     dtype=torch.complex64)
 
 # rotate X gate
-RX: Callable[[float], torch.Tensor] = lambda theta: torch.tensor(
-    [[torch.cos(torch.tensor(theta / 2)), -1j * torch.sin(torch.tensor(theta / 2))],
-    [-1j * torch.sin(torch.tensor(theta / 2)), torch.cos(torch.tensor(theta / 2))]],
+RX: Callable[[torch.Tensor], torch.Tensor] = lambda theta: torch.tensor(
+    [[torch.cos(theta / 2), -1j * torch.sin(theta / 2)],
+    [-1j * torch.sin(theta / 2), torch.cos(theta / 2)]],
     dtype=torch.complex64)
 
 # rotate Y gate
-RY: Callable[[float], torch.Tensor] = lambda theta: torch.tensor(
-    [[torch.cos(torch.tensor(theta / 2)), -torch.sin(torch.tensor(theta / 2))],
-    [torch.sin(torch.tensor(theta / 2)), torch.cos(torch.tensor(theta / 2))]],
+RY: Callable[[torch.Tensor], torch.Tensor] = lambda theta: torch.tensor(
+    [[torch.cos(theta / 2), -torch.sin(theta / 2)],
+    [torch.sin(theta / 2), torch.cos(theta / 2)]],
     dtype=torch.complex64)
 
 # rotate Z gate
-RZ: Callable[[float], torch.Tensor] = lambda theta: torch.tensor(
-    [[torch.cos(torch.tensor(theta / 2)) - 1j * torch.sin(torch.tensor(theta / 2)), 0],
-    [0, torch.cos(torch.tensor(theta / 2)) + 1j * torch.sin(torch.tensor(theta / 2))]],
+# NOTE: theta must be a (1,) tensor
+RZ: Callable[[torch.Tensor], torch.Tensor] = lambda theta: torch.tensor(
+    [[torch.cos(theta / 2) - 1j * torch.sin(theta / 2), 0],
+    [0, torch.cos(theta / 2) + 1j * torch.sin(theta / 2)]],
     dtype=torch.complex64)
 
 # CNOT aka CX
@@ -64,6 +77,13 @@ CZ = torch.tensor(
      [0, 1, 0, 0],
      [0, 0, 1, 0],
      [0, 0, 0, -1]],
+    dtype=torch.complex64)
+
+SWAP = torch.tensor(
+    [[1, 0, 0, 0],
+     [0, 0, 1, 0],
+     [0, 1, 0, 0],
+     [0, 0, 0, 1]],
     dtype=torch.complex64)
 
 # CCNOT aka Toffoli aka CCX

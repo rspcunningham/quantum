@@ -31,10 +31,14 @@ class QuantumSystem:
             state_vector = torch.zeros((2 ** n_qubits, 1), dtype=torch.complex64)
             state_vector[0] = 1.0  # |0⟩ state has amplitude 1 in the first position
 
-        self.state_vector = state_vector
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else
+            "mps"  if torch.backends.mps.is_available() else
+            "cpu"
+        )
+        self.state_vector = state_vector.to(self.device)
         self.n_qubits = n_qubits
         self.dimensions = 2 ** self.n_qubits
-        self.device = torch.device("mps")
         self.state_vector = self.state_vector.to(self.device)
 
     def get_distribution(self) -> torch.Tensor:
@@ -53,7 +57,7 @@ class QuantumSystem:
         self.state_vector[value] = 1.0
         return value
 
-    def apply_gate(self, gate: torch.Tensor, targets: list[int]) -> None:
+    def apply_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
         n_targets = len(targets)
         swaps: list[torch.Tensor] = []
@@ -88,9 +92,13 @@ class QuantumSystem:
         assert torch.allclose(norm, torch.tensor(1.0, device=self.device), atol=1e-5), f"Norm drift: {norm}"
         self.state_vector = self.state_vector / norm
 
-    def apply_circuit(self, circuit: Circuit):
+        return self
+
+    def apply_circuit(self, circuit: Circuit) -> "QuantumSystem":
         for gate in circuit.gates:
-            self.apply_gate(gate.tensor, gate.targets)
+            _ = self.apply_gate(gate.tensor, gate.targets)
+
+        return self
 
     def _gate_to_leftmost_matrix(self, gate: torch.Tensor, n_targets: int) -> torch.Tensor:
 
