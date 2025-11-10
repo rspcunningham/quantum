@@ -10,11 +10,9 @@ __all__ = ["QuantumSystem", "Circuit"]
 
 
 class Circuit:
-    n_qubits: int
     gates: list[Gate]
 
-    def __init__(self, n_qubits: int, gates: list[Gate]):
-        self.n_qubits = n_qubits
+    def __init__(self, gates: list[Gate]):
         self.gates = gates
 
 
@@ -49,13 +47,21 @@ class QuantumSystem:
         values = torch.multinomial(distribution, num_shots, replacement=True)
         return [int(x.item()) for x in values[0]]
 
-    def measure(self) -> int:
-        """Note: this will collapse |ψ⟩ state."""
-        distribution = self.get_distribution().T  # Convert (n, 1) to (1, n) for multinomial
-        value = int(torch.multinomial(distribution, 1, replacement=True).item())
-        self.state_vector = torch.zeros_like(self.state_vector)
-        self.state_vector[value] = 1.0
-        return value
+    def measure(self, qubit: int) -> tuple[int, "QuantumSystem"]:
+        """Note: this will collapse |ψ⟩ state at that qubit."""
+
+        indices = torch.arange(1 << self.n_qubits)
+        mask_1 = (indices >> qubit) & 1
+        probs = self.get_distribution()
+        p1 = probs[mask_1].sum()
+        outcome = 1 if torch.rand(1).item() < p1 else 0
+
+        P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64)
+        P_full = self._gate_to_qubit(P, qubit=qubit)
+        self.state_vector = P_full @ self.state_vector
+        self.state_vector = self.state_vector / torch.sqrt(P_full)
+
+        return outcome, self
 
     def apply_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
@@ -80,7 +86,7 @@ class QuantumSystem:
             self.state_vector = u @ self.state_vector
 
         # ---- 3. apply the gate on the *left-most* (highest) dimensions ----
-        gate_full = self._gate_to_leftmost_matrix(gate.to(self.device), n_targets)
+        gate_full = self._gate_to_qubit(gate.to(self.device), n_targets)
         self.state_vector = gate_full @ self.state_vector
 
         # ---- 4. undo the swaps (they are their own inverse) ----
@@ -100,12 +106,12 @@ class QuantumSystem:
 
         return self
 
-    def _gate_to_leftmost_matrix(self, gate: torch.Tensor, n_targets: int) -> torch.Tensor:
+    def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, qubit: int = 0) -> torch.Tensor:
 
         I = torch.eye(2, dtype=gate.dtype, device=gate.device)
 
         # Build list of local operators for each qubit
-        factors = [gate, *[I for _ in range(self.n_qubits - n_targets)]]
+        factors = [*[I for _ in range(qubit)], gate, *[I for _ in range(self.n_qubits - n_targets - qubit)]]
 
         # Kronecker product left-to-right
         full = factors[0]
