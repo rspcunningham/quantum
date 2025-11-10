@@ -1,7 +1,7 @@
 import torch
 from typing import Callable
 
-__all__ = ["I", "H", "X", "Y", "Z", "RZ", "CX", "CZ", "CCX", "Gate"]
+__all__ = ["I", "H", "X", "Y", "Z", "RZ", "CX", "CZ", "CCX", "Controlled", "Gate"]
 
 # identity gate
 I = torch.tensor(
