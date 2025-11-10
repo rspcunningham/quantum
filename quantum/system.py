@@ -55,41 +55,35 @@ class QuantumSystem:
 
     def apply_gate(self, gate: torch.Tensor, targets: list[int]) -> None:
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
-
-        # step 0: build swap matrix stack
         n_targets = len(targets)
         swaps: list[torch.Tensor] = []
-        positions = list(range(self.n_qubits)) # track positions of qubits
+        positions = list(range(self.n_qubits))          # current location of each qubit
 
+        # ---- 1. move the target qubits to the *highest* positions (n-1, n-2, …) ----
         for i in range(n_targets):
-            target = targets[i]
-            # find where the target actually is
-            current_position = positions.index(target)
+            target = targets[i]                         # original qubit index
+            desired_pos = self.n_qubits - 1 - i          # n-1, n-2, …
+            cur_pos = positions.index(target)
 
-            if target != i: # i == the desired position
-                # move the target from current position to the desired position
-                S = self._get_swap_matrix(current_position, i)
+            if cur_pos != desired_pos:
+                S = self._get_swap_matrix(cur_pos, desired_pos)
                 swaps.append(S)
-
                 # update tracking
-                positions[current_position] = i
-                positions[i] = current_position
+                positions[cur_pos], positions[desired_pos] = positions[desired_pos], positions[cur_pos]
 
+        # ---- 2. swap the state vector to the new ordering ----
+        for u in swaps:
+            self.state_vector = u @ self.state_vector
 
-        # step 1: SWAP bits to all be adjacent
-        for i in range(len(swaps)):
-            self.state_vector = swaps[i] @ self.state_vector
+        # ---- 3. apply the gate on the *left-most* (highest) dimensions ----
+        gate_full = self._gate_to_leftmost_matrix(gate.to(self.device), n_targets)
+        self.state_vector = gate_full @ self.state_vector
 
-        # step 2: apply the gate
-        gate = gate.to(self.device)
-        gate_full_matrix = self._gate_to_leftmost_matrix(gate, n_targets)
-        self.state_vector = gate_full_matrix @ self.state_vector
+        # ---- 4. undo the swaps (they are their own inverse) ----
+        for u in reversed(swaps):
+            self.state_vector = u @ self.state_vector
 
-        # step 3: SWAP bits back to original order
-        for i in range(len(swaps)):
-            self.state_vector = swaps[n_targets - i - 1] @ self.state_vector
-
-        # step 4: renormalize to prevent floating-point drift
+        # ---- 5. renormalise (safety) ----
         norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
         assert torch.allclose(norm, torch.tensor(1.0, device=self.device), atol=1e-5), f"Norm drift: {norm}"
         self.state_vector = self.state_vector / norm

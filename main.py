@@ -26,3 +26,8 @@ c = Circuit(
 
 sys.apply_circuit(c)
 print(sys)
+
+print("------------------------------------------------------------------------")
+sys = QuantumSystem(2)
+sys.apply_gate(gates.H, [0])     # Should put qubit 0 in superposition
+print(sys)
