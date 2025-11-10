@@ -6,14 +6,19 @@ import numpy as np
 import numpy.typing as npt
 from quantum.gates import Gate
 
-__all__ = ["QuantumSystem", "Circuit"]
+__all__ = ["QuantumSystem", "Circuit", "Measurement"]
 
+
+class Measurement:
+    targets: list[int]
+    def __init__(self, targets: list[int]):
+        self.targets = targets
 
 class Circuit:
-    gates: list[Gate]
+    operations: list[Gate | Measurement]
 
-    def __init__(self, gates: list[Gate]):
-        self.gates = gates
+    def __init__(self, operations: list[Gate | Measurement]):
+        self.operations = operations
 
 
 class QuantumSystem:
@@ -47,21 +52,23 @@ class QuantumSystem:
         values = torch.multinomial(distribution, num_shots, replacement=True)
         return [int(x.item()) for x in values[0]]
 
-    def measure(self, qubit: int) -> tuple[int, "QuantumSystem"]:
+    def measure(self, qubit: int) -> "QuantumSystem":
         """Note: this will collapse |ψ⟩ state at that qubit."""
 
         indices = torch.arange(1 << self.n_qubits)
         mask_1 = (indices >> qubit) & 1
-        probs = self.get_distribution()
+        probs = self.get_distribution().flatten()
         p1 = probs[mask_1].sum()
         outcome = 1 if torch.rand(1).item() < p1 else 0
 
-        P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64)
+        P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
         P_full = self._gate_to_qubit(P, qubit=qubit)
-        self.state_vector = P_full @ self.state_vector
-        self.state_vector = self.state_vector / torch.sqrt(P_full)
 
-        return outcome, self
+        self.state_vector = P_full @ self.state_vector
+        norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
+        self.state_vector = self.state_vector / norm
+
+        return self
 
     def apply_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
@@ -101,8 +108,12 @@ class QuantumSystem:
         return self
 
     def apply_circuit(self, circuit: Circuit) -> "QuantumSystem":
-        for gate in circuit.gates:
-            _ = self.apply_gate(gate.tensor, gate.targets)
+        for operation in circuit.operations:
+            if isinstance(operation, Measurement):
+                for target in operation.targets:
+                    _ = self.measure(target)
+            else:
+                _ = self.apply_gate(operation.tensor, operation.targets)
 
         return self
 
