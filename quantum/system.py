@@ -10,9 +10,9 @@ __all__ = ["QuantumSystem", "Circuit", "Measurement"]
 
 
 class Measurement:
-    targets: list[int]
-    def __init__(self, targets: list[int]):
-        self.targets = targets
+    target: int
+    def __init__(self, target: int):
+        self.target = target
 
 class Circuit:
     operations: list[Gate | Measurement]
@@ -62,7 +62,7 @@ class QuantumSystem:
         outcome = 1 if torch.rand(1).item() < p1 else 0
 
         P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
-        P_full = self._gate_to_qubit(P, qubit=qubit)
+        P_full = self._gate_to_qubit(P, offset=qubit)
 
         self.state_vector = P_full @ self.state_vector
         norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
@@ -110,19 +110,18 @@ class QuantumSystem:
     def apply_circuit(self, circuit: Circuit) -> "QuantumSystem":
         for operation in circuit.operations:
             if isinstance(operation, Measurement):
-                for target in operation.targets:
-                    _ = self.measure(target)
+                _ = self.measure(operation.target)
             else:
                 _ = self.apply_gate(operation.tensor, operation.targets)
 
         return self
 
-    def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, qubit: int = 0) -> torch.Tensor:
+    def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, offset: int = 0) -> torch.Tensor:
 
         I = torch.eye(2, dtype=gate.dtype, device=gate.device)
 
         # Build list of local operators for each qubit
-        factors = [*[I for _ in range(qubit)], gate, *[I for _ in range(self.n_qubits - n_targets - qubit)]]
+        factors = [*[I for _ in range(offset)], gate, *[I for _ in range(self.n_qubits - n_targets - offset)]]
 
         # Kronecker product left-to-right
         full = factors[0]

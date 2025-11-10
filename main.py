@@ -9,7 +9,8 @@ c = Circuit([
         Gate(gates.H, [0]),
         Gate(gates.CX, [0, 1]),
         Gate(gates.RY(theta), [0]),
-        Measurement([1, 0])
+        Measurement(1),
+        Measurement(0)
     ])
 
 sys = QuantumSystem(2)

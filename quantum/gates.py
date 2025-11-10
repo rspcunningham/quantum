@@ -98,6 +98,13 @@ CCX = torch.tensor(
      [0, 0, 0, 0, 0, 0, 1, 0]],
     dtype=torch.complex64)
 
+# Controlled-U gate, ie. controlled verstion of any other gate
+Controlled: Callable[[torch.Tensor], torch.Tensor] = lambda gate: torch.tensor(
+    [[1, 0, 0, 0],
+     [0, 1, 0, 0],
+     [0, 0, gate[0, 0], gate[0, 1]],
+     [0, 0, gate[1, 0], gate[1, 1]]],
+    dtype=torch.complex64)
 
 class Gate:
     tensor: torch.Tensor
