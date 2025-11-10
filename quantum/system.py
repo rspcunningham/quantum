@@ -56,7 +56,7 @@ class QuantumSystem:
         """Note: this will collapse |ψ⟩ state at that qubit."""
 
         indices = torch.arange(1 << self.n_qubits)
-        mask_1 = (indices >> qubit) & 1
+        mask_1 = ((indices >> qubit) & 1).bool()
         probs = self.get_distribution().flatten()
         p1 = probs[mask_1].sum()
         outcome = 1 if torch.rand(1).item() < p1 else 0
