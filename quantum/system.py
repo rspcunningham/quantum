@@ -79,8 +79,10 @@ class QuantumSystem:
 
         indices = torch.arange(1 << self.n_qubits, device=self.device)
 
+        # we need this jank because python bit operations are little-endian
+        bitpos = self.n_qubits - 1 - qubit
         # True on basis states with target qubit set to |1⟩
-        mask_1 = ((indices >> qubit) & 1).bool()
+        mask_1 = ((indices >> bitpos) & 1).bool()
         probs = self.get_distribution().flatten()
         p1 = probs[mask_1].sum()
         outcome = 1 if torch.rand(1).item() < p1 else 0
@@ -120,10 +122,11 @@ class QuantumSystem:
         swaps: list[torch.Tensor] = []
         positions = list(range(self.n_qubits))          # current location of each qubit
 
-        # ---- 1. move the target qubits to the *highest* positions (n-1, n-2, …) ----
+        # ---- 1. move the target qubits to the *lowest* positions (0, 1, 2, …) ----
+        # This corresponds to the leftmost positions in the Kronecker product
         for i in range(n_targets):
             target = targets[i]                         # original qubit index
-            desired_pos = self.n_qubits - 1 - i          # n-1, n-2, …
+            desired_pos = i                              # 0, 1, 2, …
             cur_pos = positions.index(target)
 
             if cur_pos != desired_pos:
@@ -177,7 +180,7 @@ class QuantumSystem:
     def _get_swap_matrix(self, target_1: int, target_2: int) -> torch.Tensor:
 
         # 2 ** self.n_qubits with bitshift operator
-        dim: int = 1 << self.n_qubits
+        dim = 1 << self.n_qubits
 
         S = torch.zeros((dim, dim), dtype=torch.complex64, device=self.device)
 
