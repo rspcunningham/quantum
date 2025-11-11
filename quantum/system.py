@@ -1,33 +1,39 @@
 """Quantum system state management."""
 
+from __future__ import annotations
+
 from typing import Annotated, cast, override
 import torch
 import numpy as np
 import numpy.typing as npt
-from quantum.gates import Gate
+from quantum.quantum_gates import Gate
 
 __all__ = ["QuantumSystem", "Circuit", "Measurement"]
 
 
 class Measurement:
     target: int
-    def __init__(self, target: int):
+    output: int
+    def __init__(self, target: int, output: int):
         self.target = target
+        self.output = output
 
 class Circuit:
-    operations: list[Gate | Measurement]
+    operations: list[Gate | Measurement | Circuit]
 
-    def __init__(self, operations: list[Gate | Measurement]):
+    def __init__(self, operations: list[Gate | Measurement | Circuit]):
         self.operations = operations
 
 
 class QuantumSystem:
     state_vector: Annotated[torch.Tensor, "(n, 1) complex64 column vector"]
+    bit_register: Annotated[torch.Tensor, "(n_bits, 1) bool column vector"]
     n_qubits: int
+    n_bits: int
     dimensions: int
     device: torch.device
 
-    def __init__(self, n_qubits: int, state_vector: torch.Tensor | None = None):
+    def __init__(self, n_qubits: int, n_bits: int = 0, state_vector: torch.Tensor | None = None):
 
         if state_vector is None:
             # Initialize state vector to |000...0⟩
@@ -40,7 +46,9 @@ class QuantumSystem:
             "cpu"
         )
         self.state_vector = state_vector.to(self.device)
+        self.bit_register = torch.zeros((n_bits, 1), dtype=torch.bool).to(self.device)
         self.n_qubits = n_qubits
+        self.n_bits = n_bits
         self.dimensions = 2 ** self.n_qubits
         self.state_vector = self.state_vector.to(self.device)
 
@@ -52,7 +60,7 @@ class QuantumSystem:
         values = torch.multinomial(distribution, num_shots, replacement=True)
         return [int(x.item()) for x in values[0]]
 
-    def measure(self, qubit: int) -> "QuantumSystem":
+    def measure(self, qubit: int, output: int) -> "QuantumSystem":
         """Note: this will collapse |ψ⟩ state at that qubit."""
 
         indices = torch.arange(1 << self.n_qubits)
@@ -60,6 +68,7 @@ class QuantumSystem:
         probs = self.get_distribution().flatten()
         p1 = probs[mask_1].sum()
         outcome = 1 if torch.rand(1).item() < p1 else 0
+        self.bit_register[output] = bool(outcome)
 
         P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
         P_full = self._gate_to_qubit(P, offset=qubit)
@@ -70,7 +79,7 @@ class QuantumSystem:
 
         return self
 
-    def apply_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
+    def apply_quantum_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
         n_targets = len(targets)
         swaps: list[torch.Tensor] = []
@@ -110,10 +119,11 @@ class QuantumSystem:
     def apply_circuit(self, circuit: Circuit) -> "QuantumSystem":
         for operation in circuit.operations:
             if isinstance(operation, Measurement):
-                _ = self.measure(operation.target)
+                _ = self.measure(operation.target, operation.output)
+            elif isinstance(operation, Gate):
+                _ = self.apply_quantum_gate(operation.tensor, operation.targets)
             else:
-                _ = self.apply_gate(operation.tensor, operation.targets)
-
+                _ = self.apply_circuit(operation)
         return self
 
     def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, offset: int = 0) -> torch.Tensor:
@@ -159,6 +169,8 @@ class QuantumSystem:
         vec: npt.NDArray[np.complex64] = self.state_vector.cpu().numpy().flatten()
         terms: list[str] = []
 
+        number_of_decimals = 10
+
         for i in range(len(vec)):
             val = cast(np.complex64, vec[i])
             # Format the basis state |i⟩ as binary
@@ -175,14 +187,14 @@ class QuantumSystem:
 
             if abs(imag) < 1e-10:
                 # Pure real
-                coef = f"{real:.4f}"
+                coef = f"{real:.{number_of_decimals}f}"
             elif abs(real) < 1e-10:
                 # Pure imaginary
-                coef = f"{imag:.4f}i"
+                coef = f"{imag:.{number_of_decimals}f}i"
             else:
                 # Complex
                 sign = "+" if imag >= 0 else "-"
-                coef = f"({real:.4f} {sign} {abs(imag):.4f}i)"
+                coef = f"({real:.{number_of_decimals}f} {sign} {abs(imag):.{number_of_decimals}f}i)"
 
             terms.append(f"{coef}|{basis}⟩")
 
@@ -198,5 +210,10 @@ class QuantumSystem:
                 result += f" - {term[1:]}"
             else:
                 result += f" + {term}"
+
+        # Add classical register display if we have classical bits
+        if self.n_bits > 0:
+            bit_string = "".join(str(int(b)) for b in self.bit_register.flatten().cpu())
+            result += f"\tClassical register: {bit_string}"
 
         return result
