@@ -1,22 +1,21 @@
 from quantum import QuantumSystem, Circuit, Gate, gates
 import torch
 
+from quantum.system import Measurement
+
 theta = torch.tensor(torch.pi / 2)
 
-c = Circuit([
-        Gate(gates.H, [0]),
-        Gate(gates.CX, [0, 1]),
-        Gate(gates.RY(theta), [0]),
-    ])
+sys = QuantumSystem(2, 10)
+print(sys)
 
-c_big = Circuit([
-    c, c, c
+c = Circuit([
+    Gate(gates.H, [0]),
+    Gate(gates.CX, [0, 1]),
+    Gate(gates.RY(theta), [0])
 ])
 
+sys = sys.apply_circuit(c)
+print(sys)
 
-sys = QuantumSystem(2)
-print(f"Number of circuits: 0. State: {sys}")
-
-for i in range(10):
-    sys = sys.apply_circuit(c)
-    print(f"Number of circuits: {i+1}. State: {sys}")
+sys = sys.apply_circuit(Circuit([Measurement(0, 0)]))
+print(sys)
