@@ -34,11 +34,19 @@ class QuantumSystem:
     device: torch.device
 
     def __init__(self, n_qubits: int, n_bits: int = 0, state_vector: torch.Tensor | None = None):
+        if n_qubits <= 0:
+            raise ValueError(f"Number of qubits must be positive, got {n_qubits}")
+        if n_bits < 0:
+            raise ValueError(f"Number of classical bits must be non-negative, got {n_bits}")
 
         if state_vector is None:
             # Initialize state vector to |000...0⟩
             state_vector = torch.zeros((2 ** n_qubits, 1), dtype=torch.complex64)
             state_vector[0] = 1.0  # |0⟩ state has amplitude 1 in the first position
+        else:
+            expected_dim = 1 << n_qubits
+            if state_vector.shape != (expected_dim, 1):
+                raise ValueError(f"State vector must have shape ({expected_dim}, 1) for {n_qubits} qubits, got {state_vector.shape}")
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else
@@ -50,7 +58,6 @@ class QuantumSystem:
         self.n_qubits = n_qubits
         self.n_bits = n_bits
         self.dimensions = 2 ** self.n_qubits
-        self.state_vector = self.state_vector.to(self.device)
 
     def get_distribution(self) -> torch.Tensor:
         return torch.abs(self.state_vector) ** 2
@@ -65,6 +72,10 @@ class QuantumSystem:
 
         In big-endian convention, qubit i corresponds to bit position (n_qubits - 1 - i).
         """
+        if qubit < 0 or qubit >= self.n_qubits:
+            raise ValueError(f"Qubit index {qubit} out of range [0, {self.n_qubits})")
+        if output < 0 or output >= self.n_bits:
+            raise ValueError(f"Classical bit index {output} out of range [0, {self.n_bits})")
 
         indices = torch.arange(1 << self.n_qubits, device=self.device)
 
@@ -91,6 +102,21 @@ class QuantumSystem:
     def apply_quantum_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
         n_targets = len(targets)
+
+        # Validate targets
+        if n_targets == 0:
+            raise ValueError("Must specify at least one target qubit")
+        for target in targets:
+            if target < 0 or target >= self.n_qubits:
+                raise ValueError(f"Target qubit {target} out of range [0, {self.n_qubits})")
+        if len(set(targets)) != len(targets):
+            raise ValueError(f"Duplicate target qubits not allowed: {targets}")
+
+        # Validate gate dimensions
+        expected_dim = 1 << n_targets
+        if gate.shape != (expected_dim, expected_dim):
+            raise ValueError(f"Gate matrix must have shape ({expected_dim}, {expected_dim}) for {n_targets} target(s), got {gate.shape}")
+
         swaps: list[torch.Tensor] = []
         positions = list(range(self.n_qubits))          # current location of each qubit
 
