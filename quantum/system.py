@@ -27,7 +27,7 @@ class Circuit:
 
 class QuantumSystem:
     state_vector: Annotated[torch.Tensor, "(n, 1) complex64 column vector"]
-    bit_register: Annotated[torch.Tensor, "(n_bits, 1) bool column vector"]
+    bit_register: Annotated[list[int], "(n_bits) bit string"]
     n_qubits: int
     n_bits: int
     dimensions: int
@@ -46,7 +46,7 @@ class QuantumSystem:
             "cpu"
         )
         self.state_vector = state_vector.to(self.device)
-        self.bit_register = torch.zeros((n_bits, 1), dtype=torch.bool).to(self.device)
+        self.bit_register = [0] * n_bits
         self.n_qubits = n_qubits
         self.n_bits = n_bits
         self.dimensions = 2 ** self.n_qubits
@@ -73,7 +73,7 @@ class QuantumSystem:
         probs = self.get_distribution().flatten()
         p1 = probs[mask_1].sum()
         outcome = 1 if torch.rand(1).item() < p1 else 0
-        self.bit_register[output] = bool(outcome)
+        self.bit_register[output] = outcome
 
         # Build projection operator: project onto |outcome⟩ for the target qubit
         P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
@@ -221,7 +221,7 @@ class QuantumSystem:
 
         # Add classical register display if we have classical bits
         if self.n_bits > 0:
-            bit_string = "".join(str(int(b)) for b in self.bit_register.flatten().cpu())
+            bit_string = "".join(str(b) for b in self.bit_register)
             result += f"\tClassical register: {bit_string}"
 
         return result
