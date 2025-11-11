@@ -67,34 +67,25 @@ class QuantumSystem:
         """
 
         indices = torch.arange(1 << self.n_qubits, device=self.device)
-        print(f"Indices: {indices}")
 
         # True on basis states with target qubit set to |1⟩
         mask_1 = ((indices >> qubit) & 1).bool()
-        print(f"Mask 1: {mask_1}")
         probs = self.get_distribution().flatten()
-        print(f"Probs: {probs}")
         p1 = probs[mask_1].sum()
-        print(f"P1: {p1}")
         outcome = 1 if torch.rand(1).item() < p1 else 0
-        print(f"Outcome: {outcome}")
         self.bit_register[output] = bool(outcome)
-        print(f"Bit Register: {self.bit_register}")
 
         # Build projection operator: project onto |outcome⟩ for the target qubit
         P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
-        print(f"Projection Operator: {P}")
 
         # Apply projection using the quantum gate machinery
         P_full = self._gate_to_qubit(P, n_targets=1, offset=qubit)
-        print(f"Full Projection Operator: {P_full}")
 
+        # update state vector
         self.state_vector = P_full @ self.state_vector
-        print(f"Non-Normalized Vector: {self.state_vector}")
         norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
         self.state_vector = self.state_vector / norm
 
-        print(f"State Vector: {self.state_vector}")
         return self
 
     def apply_quantum_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
@@ -150,7 +141,6 @@ class QuantumSystem:
 
         # Build list of local operators for each qubit
         factors = [*[I for _ in range(offset)], gate, *[I for _ in range(self.n_qubits - n_targets - offset)]]
-        print(f"Factors: {factors}")
         # Kronecker product left-to-right
         full = factors[0]
         for f in factors[1:]:
