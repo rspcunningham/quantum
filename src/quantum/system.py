@@ -6,7 +6,7 @@ from typing import Annotated, cast, override
 import torch
 import numpy as np
 import numpy.typing as npt
-from quantum.quantum_gates import Gate
+from quantum.gates import Gate
 
 __all__ = ["QuantumSystem", "Circuit", "Measurement"]
 
