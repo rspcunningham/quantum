@@ -6,22 +6,12 @@ from typing import Annotated, cast, override
 import torch
 import numpy as np
 import numpy.typing as npt
-from quantum.gates import Gate
-
-__all__ = ["QuantumSystem", "Circuit", "Measurement"]
-
-
-class Measurement:
-    target: int
-    output: int
-    def __init__(self, target: int, output: int):
-        self.target = target
-        self.output = output
+from quantum.gates import Gate, Measurement, ConditionalGate
 
 class Circuit:
-    operations: list[Gate | Measurement | Circuit]
+    operations: list[Gate | ConditionalGate | Measurement | Circuit]
 
-    def __init__(self, operations: list[Gate | Measurement | Circuit]):
+    def __init__(self, operations: list[Gate | ConditionalGate | Measurement | Circuit]):
         self.operations = operations
 
 
@@ -160,6 +150,9 @@ class QuantumSystem:
                 _ = self.measure(operation.target, operation.output)
             elif isinstance(operation, Gate):
                 _ = self.apply_quantum_gate(operation.tensor, operation.targets)
+            elif isinstance(operation, ConditionalGate):
+                if self.bit_register[operation.classical_target]:
+                    _ = self.apply_quantum_gate(operation.gate.tensor, operation.gate.targets)
             else:
                 _ = self.apply_circuit(operation)
         return self

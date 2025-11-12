@@ -1,7 +1,12 @@
 import torch
 from typing import Callable
 
-__all__ = ["I", "H", "X", "Y", "Z", "S", "T", "RX", "RY", "RZ", "CX", "CZ", "SWAP", "CCX", "Controlled", "Gate"]
+class Measurement:
+    target: int
+    output: int
+    def __init__(self, target: int, output: int):
+        self.target = target
+        self.output = output
 
 class Gate:
     tensor: torch.Tensor
@@ -10,6 +15,14 @@ class Gate:
     def __init__(self, tensor: torch.Tensor, targets: list[int]):
         self.tensor = tensor
         self.targets = targets
+
+class ConditionalGate:
+    gate: Gate
+    classical_target: int
+
+    def __init__(self, gate: Gate, classical_target: int):
+        self.gate = gate
+        self.classical_target = classical_target
 
 # Base class for single-qubit gates
 class SingleQubitGate:
