@@ -1,5 +1,4 @@
 from quantum import QuantumSystem, Circuit, gates
-
 from quantum.system import Measurement
 
 print("Test Bell state correlation (should only see 00 or 11)")
