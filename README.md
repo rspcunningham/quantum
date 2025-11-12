@@ -38,10 +38,15 @@ print(qs)  # See the quantum state in Dirac notation
 ## Available Gates
 
 **Single-qubit:** I, H, X, Y, Z, S, T
+
 **Parametric:** RX(θ), RY(θ), RZ(θ)
+
 **Two-qubit:** CX, CZ, SWAP
+
 **Three-qubit:** CCX (Toffoli)
+
 **General:** Controlled(gate), ConditionalGate(gate, classical_bit)
+
 **Measurement:** Measurement(qubit, classical_bit)
 
 ## Purpose
@@ -49,6 +54,7 @@ print(qs)  # See the quantum state in Dirac notation
 This is an educational tool for understanding quantum mechanics and quantum computing fundamentals. It's intentionally unoptimized to make the mathematics transparent.
 
 **Use this to:** Learn how quantum gates work, prototype small algorithms, teach quantum computing
+
 **Don't use this for:** Large-scale simulations, production code, performance-critical applications
 
 ## Requirements
