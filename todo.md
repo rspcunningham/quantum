@@ -333,22 +333,22 @@ The `_get_swap_matrix` method (lines 173-194) is clever and efficient. Nice work
 ## Summary Recommendations
 
 ### High Priority:
-1. **Fix RZ gate** to use standard exponential form
-2. **Fix ControlledGate** to handle gradients and validate input
-3. **Unify gate API** - consistent calling convention across all gate types
-4. **Add fluent API** for circuit building
-5. **Improve measurement API** naming and add basis options
+ - [ ] 1. **Fix RZ gate** to use standard exponential form
+ - [ ] 2. **Fix ControlledGate** to handle gradients and validate input
+ - [ ] 3. **Unify gate API** - consistent calling convention across all gate types
+ - [ ] 4. **Add fluent API** for circuit building
+ - [ ] 5. **Improve measurement API** naming and add basis options
 
 ### Medium Priority:
-6. **DRY up gate definitions** with helper functions
-7. **Allow device specification** by user
-8. **Add circuit visualization** and inspection methods
-9. **Handle float/numpy inputs** in parametric gates
-10. **Better error messages** with helpful suggestions
+ - [ ] 6. **DRY up gate definitions** with helper functions
+ - [ ] 7. **Allow device specification** by user
+ - [ ] 8. **Add circuit visualization** and inspection methods
+ - [ ] 9. **Handle float/numpy inputs** in parametric gates
+ - [ ] 10. **Better error messages** with helpful suggestions
 
 ### Low Priority (nice-to-have):
-11. Add circuit optimization methods (gate fusion, etc.)
-12. Add common circuit patterns (QFT, Grover, etc.)
-13. Add statevector fidelity/distance metrics
-14. Add density matrix support for mixed states
-15. Add circuit serialization (to/from QASM, JSON, etc.)
+ - [ ] 11. Add circuit optimization methods (gate fusion, etc.)
+ - [ ] 12. Add common circuit patterns (QFT, Grover, etc.)
+ - [ ] 13. Add statevector fidelity/distance metrics
+ - [ ] 14. Add density matrix support for mixed states
+ - [ ] 15. Add circuit serialization (to/from QASM, JSON, etc.)

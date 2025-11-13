@@ -1,13 +1,13 @@
-from quantum import QuantumSystem, Circuit, gates, Measurement, ConditionalGate
+from quantum import QuantumSystem, Circuit
+from quantum.gates import H, CX, RY, Measurement
+import math
 
-print("Test Bell state correlation (should only see 00 or 11)")
-circuit = Circuit([
-    gates.H(0),
-    gates.CX([0, 1]),
+qc = Circuit([
+    H(0),
+    CX(0, 1),
+    RY(math.pi/2)(0),
     Measurement(0, 0),
-    Measurement(1, 1),
-    #ConditionalGate(gates.H(2), 0),
-    #Measurement(2, 2),
+    Measurement(1, 1)
 ])
 
 counts = {"00": 0, "01": 0, "10": 0, "11": 0}
@@ -15,7 +15,7 @@ num_shots = 100
 
 for _ in range(num_shots):
     sys = QuantumSystem(2, 2)
-    sys = sys.apply_circuit(circuit)
+    sys = sys.apply_circuit(qc)
     key = "".join(map(str, sys.bit_register))
     counts[key] += 1
 

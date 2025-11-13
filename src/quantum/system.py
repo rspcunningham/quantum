@@ -52,31 +52,49 @@ class QuantumSystem:
     def get_distribution(self) -> torch.Tensor:
         return torch.abs(self.state_vector) ** 2
 
+    def get_bits_value(self) -> int:
+        result = 0
+        for bit in self.bit_register:
+            result = (result << 1) | bit
+        return result
+
     def sample(self, num_shots: int) -> list[int]:
         distribution = self.get_distribution().T  # Convert (n, 1) to (1, n) for multinomial
         values = torch.multinomial(distribution, num_shots, replacement=True)
         return [int(x.item()) for x in values[0]]
 
-    def measure(self, qubit: int, output: int) -> "QuantumSystem":
-        """Note: this will collapse |ψ⟩ state at that qubit.
+    def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "QuantumSystem":
+        if isinstance(operation, Gate):
+            return self.apply_gate(operation)
 
-        In big-endian convention, qubit i corresponds to bit position (n_qubits - 1 - i).
+        if isinstance(operation, Measurement):
+            return self.apply_measurement(operation)
+
+        if self.get_bits_value() == operation.condition:
+            return self.apply_one(operation.gate)
+        else:
+            return self
+
+    def apply_measurement(self, measurement: Measurement) -> "QuantumSystem":
+        """Note: this will collapse |ψ⟩ state at that qubit.
         """
+        qubit = measurement.qubit
+        bit = measurement.bit
+
         if qubit < 0 or qubit >= self.n_qubits:
             raise ValueError(f"Qubit index {qubit} out of range [0, {self.n_qubits})")
-        if output < 0 or output >= self.n_bits:
-            raise ValueError(f"Classical bit index {output} out of range [0, {self.n_bits})")
+        if bit < 0 or bit >= self.n_bits:
+            raise ValueError(f"Classical bit index {bit} out of range [0, {self.n_bits})")
 
         indices = torch.arange(1 << self.n_qubits, device=self.device)
-
-        # we need this jank because python bit operations are little-endian
         bitpos = self.n_qubits - 1 - qubit
+
         # True on basis states with target qubit set to |1⟩
         mask_1 = ((indices >> bitpos) & 1).bool()
         probs = self.get_distribution().flatten()
         p1 = probs[mask_1].sum()
         outcome = 1 if torch.rand(1).item() < p1 else 0
-        self.bit_register[output] = outcome
+        self.bit_register[bit] = outcome
 
         # Build projection operator: project onto |outcome⟩ for the target qubit
         P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
@@ -91,8 +109,10 @@ class QuantumSystem:
 
         return self
 
-    def apply_quantum_gate(self, gate: torch.Tensor, targets: list[int]) -> "QuantumSystem":
+    def apply_gate(self, gate: Gate) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
+        targets = gate.targets
+        tensor = gate.tensor
         n_targets = len(targets)
 
         # Validate targets
@@ -106,8 +126,8 @@ class QuantumSystem:
 
         # Validate gate dimensions
         expected_dim = 1 << n_targets
-        if gate.shape != (expected_dim, expected_dim):
-            raise ValueError(f"Gate matrix must have shape ({expected_dim}, {expected_dim}) for {n_targets} target(s), got {gate.shape}")
+        if tensor.shape != (expected_dim, expected_dim):
+            raise ValueError(f"Gate matrix must have shape ({expected_dim}, {expected_dim}) for {n_targets} target(s), got {tensor.shape}")
 
         swaps: list[torch.Tensor] = []
         positions = list(range(self.n_qubits))          # current location of each qubit
@@ -130,7 +150,7 @@ class QuantumSystem:
             self.state_vector = u @ self.state_vector
 
         # ---- 3. apply the gate on the *left-most* (highest) dimensions ----
-        gate_full = self._gate_to_qubit(gate.to(self.device), n_targets)
+        gate_full = self._gate_to_qubit(tensor.to(self.device), n_targets)
         self.state_vector = gate_full @ self.state_vector
 
         # ---- 4. undo the swaps (they are their own inverse) ----
@@ -146,15 +166,11 @@ class QuantumSystem:
 
     def apply_circuit(self, circuit: Circuit) -> "QuantumSystem":
         for operation in circuit.operations:
-            if isinstance(operation, Measurement):
-                _ = self.measure(operation.target, operation.output)
-            elif isinstance(operation, Gate):
-                _ = self.apply_quantum_gate(operation.tensor, operation.targets)
-            elif isinstance(operation, ConditionalGate):
-                if self.bit_register[operation.classical_target]:
-                    _ = self.apply_quantum_gate(operation.gate.tensor, operation.gate.targets)
-            else:
+            if isinstance(operation, Circuit):
                 _ = self.apply_circuit(operation)
+            else:
+                _ = self.apply_one(operation)
+
         return self
 
     def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, offset: int = 0) -> torch.Tensor:

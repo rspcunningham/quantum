@@ -1,180 +1,101 @@
 import torch
-from typing import Callable
+import math
+from typing import Callable, cast
 
-class Measurement:
-    target: int
-    output: int
-    def __init__(self, target: int, output: int):
-        self.target = target
-        self.output = output
+def _complex_matrix(data: list[list[complex | int | float]]) -> torch.Tensor:
+    return torch.tensor(data, dtype=torch.complex64)
+
+expand_diagonal = cast(Callable[..., torch.Tensor], torch.block_diag)
 
 class Gate:
     tensor: torch.Tensor
     targets: list[int]
 
-    def __init__(self, tensor: torch.Tensor, targets: list[int]):
+    def __init__(self, tensor: torch.Tensor, *targets: int):
         self.tensor = tensor
-        self.targets = targets
+        self.targets = list(targets)
 
-class ConditionalGate:
-    gate: Gate
-    classical_target: int
+    def if_(self, classical_bit: int) -> 'ConditionalGate':
+        """Make this gate conditional on a classical bit being 1.
 
-    def __init__(self, gate: Gate, classical_target: int):
-        self.gate = gate
-        self.classical_target = classical_target
+        Usage: H(0).if_(classical_bit=0)
+        """
+        return ConditionalGate(self, classical_bit)
 
-# Base class for single-qubit gates
-class SingleQubitGate:
-    _matrix: torch.Tensor
+class GateType:
+    tensor: torch.Tensor
 
-    def __init__(self, matrix: torch.Tensor):
-        self._matrix = matrix
+    def __init__(self, tensor: torch.Tensor):
+        self.tensor = tensor
 
-    def __call__(self, target: int) -> Gate:
-        return Gate(self._matrix, [target])
+    def __call__(self, *targets: int) -> Gate:
+        return Gate(self.tensor, *targets)
 
-# Base class for two-qubit gates
-class TwoQubitGate:
-    _matrix: torch.Tensor
-
-    def __init__(self, matrix: torch.Tensor):
-        self._matrix = matrix
-
-    def __call__(self, targets: list[int]) -> Gate:
-        if len(targets) != 2:
-            raise ValueError(f"Two-qubit gate requires exactly 2 targets, got {len(targets)}")
-        return Gate(self._matrix, targets)
-
-# Base class for three-qubit gates
-class ThreeQubitGate:
-    _matrix: torch.Tensor
-
-    def __init__(self, matrix: torch.Tensor):
-        self._matrix = matrix
-
-    def __call__(self, targets: list[int]) -> Gate:
-        if len(targets) != 3:
-            raise ValueError(f"Three-qubit gate requires exactly 3 targets, got {len(targets)}")
-        return Gate(self._matrix, targets)
-
-# Base class for parametric single-qubit gates
-class ParametricSingleQubitGate:
-    _matrix_fn: Callable[[torch.Tensor], torch.Tensor]
+class ParametricGateType:
+    matrix_fn: Callable[[torch.Tensor], torch.Tensor]
 
     def __init__(self, matrix_fn: Callable[[torch.Tensor], torch.Tensor]):
-        self._matrix_fn = matrix_fn
+        self.matrix_fn = matrix_fn
 
-    def __call__(self, theta: torch.Tensor) -> SingleQubitGate:
-        """Bind the parameter and return a SingleQubitGate that can be applied to a target."""
-        matrix = self._matrix_fn(theta)
-        return SingleQubitGate(matrix)
+    def __call__(self, param: float):
+        # When called with theta, return a GateType that can then be called with targets
+        param_tensor = torch.tensor(param, dtype=torch.float32)
+        matrix = self.matrix_fn(param_tensor)
+        return GateType(matrix)
 
-# identity gate
-I = SingleQubitGate(torch.tensor(
-    [[1, 0],
-     [0, 1]],
-    dtype=torch.complex64))
+class ControlledGateType:
+    tensor: torch.Tensor
 
-# hadamard gate
-H = SingleQubitGate((1 / torch.sqrt(torch.tensor(2.0))) * torch.tensor(
-    [[1, 1],
-     [1, -1]],
-    dtype=torch.complex64))
+    def __init__(self, base_gate: 'GateType | ControlledGateType'):
+        # Controlled gate = identity on control=0, base gate on control=1
+        # This expands the gate matrix by one qubit
+        eye = torch.eye(base_gate.tensor.shape[0], dtype=torch.complex64)
+        self.tensor = expand_diagonal(eye, base_gate.tensor)
 
-# phase gate
-S = SingleQubitGate(torch.tensor(
-    [[1, 0],
-     [0, 1j]],
-    dtype=torch.complex64))
+    def __call__(self, *targets: int) -> Gate:
+        return Gate(self.tensor, *targets)
 
-# pi/8 aka T gate
-T = SingleQubitGate(torch.tensor(
-    [[1, 0],
-     [0, torch.exp(torch.tensor(1j * torch.pi / 4))]],
-    dtype=torch.complex64))
 
-# pauli-x gate
-X = SingleQubitGate(torch.tensor(
-    [[0, 1],
-     [1, 0]],
-    dtype=torch.complex64))
+I = GateType(_complex_matrix([[1, 0], [0, 1]]))
+H = GateType(_complex_matrix([[1, 1], [1, -1]]) / math.sqrt(2))
+X = GateType(_complex_matrix([[0, 1], [1, 0]]))
+Y = GateType(_complex_matrix([[0, -1j], [1j, 0]]))
+Z = GateType(_complex_matrix([[1, 0], [0, -1]]))
+S = GateType(_complex_matrix([[1, 0], [0, 1j]]))
+T = GateType(_complex_matrix([[1, 0], [0, (1 + 1j) / math.sqrt(2)]]))
 
-# pauli-y gate
-Y = SingleQubitGate(torch.tensor(
-    [[0, -1j],
-     [1j, 0]],
-    dtype=torch.complex64))
-
-# pauli-z gate
-Z = SingleQubitGate(torch.tensor(
-    [[1, 0],
-     [0, -1]],
-    dtype=torch.complex64))
-
-# rotate X gate
-RX = ParametricSingleQubitGate(lambda theta: torch.tensor(
+# Parametric rotation gates
+RX = ParametricGateType(lambda theta: torch.tensor(
     [[torch.cos(theta / 2), -1j * torch.sin(theta / 2)],
-    [-1j * torch.sin(theta / 2), torch.cos(theta / 2)]],
+     [-1j * torch.sin(theta / 2), torch.cos(theta / 2)]],
     dtype=torch.complex64))
 
-# rotate Y gate
-RY = ParametricSingleQubitGate(lambda theta: torch.tensor(
+RY = ParametricGateType(lambda theta: torch.tensor(
     [[torch.cos(theta / 2), -torch.sin(theta / 2)],
-    [torch.sin(theta / 2), torch.cos(theta / 2)]],
+     [torch.sin(theta / 2), torch.cos(theta / 2)]],
     dtype=torch.complex64))
 
-# rotate Z gate
-RZ = ParametricSingleQubitGate(lambda theta: torch.tensor(
-    [[torch.cos(theta / 2) - 1j * torch.sin(theta / 2), 0],
-    [0, torch.cos(theta / 2) + 1j * torch.sin(theta / 2)]],
+RZ = ParametricGateType(lambda theta: torch.tensor(
+    [[torch.exp(-1j * theta / 2), 0],
+     [0, torch.exp(1j * theta / 2)]],
     dtype=torch.complex64))
 
-# CNOT aka CX
-CX = TwoQubitGate(torch.tensor(
-    [[1, 0, 0, 0],
-     [0, 1, 0, 0],
-     [0, 0, 0, 1],
-     [0, 0, 1, 0]],
-    dtype=torch.complex64))
+# Common controlled gates
+CX = ControlledGateType(X)   # Controlled-NOT (CNOT)
+CCX = ControlledGateType(CX)  # Toffoli gate (CCNOT)
 
-CZ = TwoQubitGate(torch.tensor(
-    [[1, 0, 0, 0],
-     [0, 1, 0, 0],
-     [0, 0, 1, 0],
-     [0, 0, 0, -1]],
-    dtype=torch.complex64))
+class Measurement:
+    qubit: int
+    bit: int
+    def __init__(self, qubit: int, bit: int):
+        self.qubit = qubit
+        self.bit = bit
 
-SWAP = TwoQubitGate(torch.tensor(
-    [[1, 0, 0, 0],
-     [0, 0, 1, 0],
-     [0, 1, 0, 0],
-     [0, 0, 0, 1]],
-    dtype=torch.complex64))
+class ConditionalGate:
+    """A gate that only executes if the classical register equals the condition value."""
+    gate: Gate
+    condition: int
 
-# CCNOT aka Toffoli aka CCX
-CCX = ThreeQubitGate(torch.tensor(
-    [[1, 0, 0, 0, 0, 0, 0, 0],
-     [0, 1, 0, 0, 0, 0, 0, 0],
-     [0, 0, 1, 0, 0, 0, 0, 0],
-     [0, 0, 0, 1, 0, 0, 0, 0],
-     [0, 0, 0, 0, 1, 0, 0, 0],
-     [0, 0, 0, 0, 0, 1, 0, 0],
-     [0, 0, 0, 0, 0, 0, 0, 1],
-     [0, 0, 0, 0, 0, 0, 1, 0]],
-    dtype=torch.complex64))
-
-# Controlled-U gate, ie. controlled version of any other gate
-class ControlledGate:
-    def __call__(self, gate_matrix: torch.Tensor, targets: list[int]) -> Gate:
-        if len(targets) != 2:
-            raise ValueError(f"Controlled gate requires exactly 2 targets (control, target), got {len(targets)}")
-        controlled_matrix = torch.tensor(
-            [[1, 0, 0, 0],
-             [0, 1, 0, 0],
-             [0, 0, gate_matrix[0, 0], gate_matrix[0, 1]],
-             [0, 0, gate_matrix[1, 0], gate_matrix[1, 1]]],
-            dtype=torch.complex64)
-        return Gate(controlled_matrix, targets)
-
-Controlled = ControlledGate()
+    def __init__(self, gate: Gate, condition: int):
+        self.gate = gate
+        self.condition = condition
