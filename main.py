@@ -1,4 +1,4 @@
-from quantum import QuantumSystem, Circuit
+from quantum import QuantumSystem, Circuit, run_simulation
 from quantum.gates import H, CX, RY, Measurement
 import math
 
@@ -10,18 +10,12 @@ qc = Circuit([
     Measurement(1, 1)
 ])
 
-counts = {"00": 0, "01": 0, "10": 0, "11": 0}
-num_shots = 100
+num_shots = 1000
+initial_system = QuantumSystem(2, 2)
+counts = run_simulation(initial_system, qc, num_shots)
 
-for _ in range(num_shots):
-    sys = QuantumSystem(2, 2)
-    sys = sys.apply_circuit(qc)
-    key = "".join(map(str, sys.bit_register))
-    counts[key] += 1
-
-print(sys)
 print(f"Results from {num_shots} shots:")
-for state, count in counts.items():
+for state, count in sorted(counts.items()):
     percentage = (count / num_shots) * 100
     print(f"  {state}: {count:4d} ({percentage:5.1f}%)")
 print()
