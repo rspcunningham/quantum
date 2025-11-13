@@ -1,4 +1,5 @@
 from quantum import QuantumSystem, Circuit, run_simulation
+from quantum.visualization import plot_results
 from quantum.gates import H, CX, RY, Measurement
 import math
 
@@ -19,3 +20,5 @@ for state, count in sorted(counts.items()):
     percentage = (count / num_shots) * 100
     print(f"  {state}: {count:4d} ({percentage:5.1f}%)")
 print()
+
+_ = plot_results(counts, title=f"Quantum Circuit Results ({num_shots} shots)")
