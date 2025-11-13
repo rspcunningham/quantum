@@ -33,7 +33,7 @@ class BatchedQuantumSystem:
 
         # Initialize all state vectors to |000...0⟩
         # Shape: (batch_size, 2^n_qubits) - each row is a state vector
-        dim = 2 ** n_qubits
+        dim = 1 << n_qubits
         self.state_vectors = torch.zeros((batch_size, dim), dtype=torch.complex64, device=device)
         self.state_vectors[:, 0] = 1.0
 
@@ -131,18 +131,17 @@ class BatchedQuantumSystem:
         if isinstance(operation, Measurement):
             return self.apply_measurement(operation)
 
-        if isinstance(operation, ConditionalGate):
-            # For conditional gates, check condition for each batch element
-            bit_values = self._get_bits_values()  # (batch_size,)
-            mask = (bit_values == operation.condition)
+        # For conditional gates, check condition for each batch element
+        bit_values = self._get_bits_values()  # (batch_size,)
+        mask = (bit_values == operation.condition)
 
-            # Only apply gate to state vectors that meet the condition
-            if mask.any():
-                # This is tricky - we need selective application
-                # For simplicity, apply to all and restore non-matching ones
-                old_states = self.state_vectors[~mask].clone()
-                self.apply_one(operation.gate)
-                self.state_vectors[~mask] = old_states
+        # Only apply gate to state vectors that meet the condition
+        if mask.any():
+            # This is tricky - we need selective application
+            # For simplicity, apply to all and restore non-matching ones
+            old_states = self.state_vectors[~mask].clone()
+            _ = self.apply_one(operation.gate)
+            self.state_vectors[~mask] = old_states
 
         return self
 
@@ -150,9 +149,9 @@ class BatchedQuantumSystem:
         """Apply a circuit to all state vectors."""
         for operation in circuit.operations:
             if isinstance(operation, Circuit):
-                self.apply_circuit(operation)
+                _ = self.apply_circuit(operation)
             else:
-                self.apply_one(operation)
+                _ = self.apply_one(operation)
         return self
 
     def _get_bits_values(self) -> torch.Tensor:
@@ -194,7 +193,8 @@ class BatchedQuantumSystem:
         # Convert bit registers to strings
         bit_registers_cpu = self.bit_registers.cpu().numpy()
         for i in range(self.batch_size):
-            key = "".join(map(str, bit_registers_cpu[i]))
+            row = cast(npt.NDArray[np.int32], bit_registers_cpu[i])
+            key = "".join(map(str, row))
             counts[key] = counts.get(key, 0) + 1
 
         return counts
@@ -222,7 +222,7 @@ def run_simulation(initial_system: QuantumSystem, circuit: Circuit, num_shots: i
     )
 
     # Apply circuit to all state vectors at once
-    batched_system.apply_circuit(circuit)
+    _ = batched_system.apply_circuit(circuit)
 
     # Collect results
     return batched_system.get_results()

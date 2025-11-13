@@ -1,6 +1,7 @@
 import torch
 import math
 from typing import Callable, cast
+from jaxtyping import Complex64
 
 def _complex_matrix(data: list[list[complex | int | float]]) -> torch.Tensor:
     return torch.tensor(data, dtype=torch.complex64)
@@ -8,10 +9,13 @@ def _complex_matrix(data: list[list[complex | int | float]]) -> torch.Tensor:
 expand_diagonal = cast(Callable[..., torch.Tensor], torch.block_diag)
 
 class Gate:
-    tensor: torch.Tensor
+    tensor: Complex64[torch.Tensor, '2n']
     targets: list[int]
 
-    def __init__(self, tensor: torch.Tensor, *targets: int):
+    def __init__(self, tensor: Complex64[torch.Tensor, '2n'], *targets: int):
+        if len(targets) != math.log2(tensor.shape[0]):
+            raise ValueError(f"Number of targets ({len(targets)}) does not match rank ({math.log2(tensor.shape[0])})")
+
         self.tensor = tensor
         self.targets = list(targets)
 
@@ -23,9 +27,9 @@ class Gate:
         return ConditionalGate(self, classical_bit)
 
 class GateType:
-    tensor: torch.Tensor
+    tensor: Complex64[torch.Tensor, '2n']
 
-    def __init__(self, tensor: torch.Tensor):
+    def __init__(self, tensor: Complex64[torch.Tensor, '2n']):
         self.tensor = tensor
 
     def __call__(self, *targets: int) -> Gate:
