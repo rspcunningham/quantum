@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import numpy.typing as npt
 from quantum.gates import Gate, Measurement, ConditionalGate
+from torch.fx.node import Target
 
 class Circuit:
     operations: list[Gate | ConditionalGate | Measurement | Circuit]
@@ -175,7 +176,10 @@ class BatchedQuantumSystem:
         dim = 1 << self.n_qubits
         S = torch.zeros((dim, dim), dtype=torch.complex64, device=self.device)
 
-        i, j = sorted((target_1, target_2))
+        b1 = self.n_qubits - 1 - target_1
+        b2 = self.n_qubits - 1 - target_2
+
+        i, j = sorted((b1, b2))
         mask = (1 << i) | (1 << j)
 
         for x in range(dim):
@@ -406,8 +410,10 @@ class QuantumSystem:
         dim = 1 << self.n_qubits
 
         S = torch.zeros((dim, dim), dtype=torch.complex64, device=self.device)
+        b1 = self.n_qubits - 1 - target_1
+        b2 = self.n_qubits - 1 - target_2
 
-        i, j = sorted((target_1, target_2))
+        i, j = sorted((b1, b2))
         mask = (1 << i) | (1 << j)
 
         for x in range(dim):
