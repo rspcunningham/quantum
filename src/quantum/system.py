@@ -265,7 +265,6 @@ class QuantumSystem:
         self.n_qubits = n_qubits
         self.n_bits = n_bits
         self.dimensions = 2 ** self.n_qubits
-        print(f"Created quantum system on: {self.device}")
 
     def get_distribution(self) -> torch.Tensor:
         return torch.abs(self.state_vector) ** 2
