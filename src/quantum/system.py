@@ -41,6 +41,7 @@ class BatchedQuantumSystem:
         # Initialize classical bit registers
         self.bit_registers = torch.zeros((batch_size, n_bits), dtype=torch.int32, device=device)
 
+    @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
         """Apply a gate to all state vectors in the batch.
 
@@ -48,7 +49,7 @@ class BatchedQuantumSystem:
         gate_full shape: (2^n, 2^n)
 
         We want: new_state_vectors[i] = gate_full @ state_vectors[i]
-        This is equivalent to: state_vectors @ gate_full.T
+        Equivalent: state_vectors @ gate_full.T (but more efficient for the gpu)
         """
         targets = gate.targets
         tensor = gate.tensor.to(self.device)
@@ -87,6 +88,7 @@ class BatchedQuantumSystem:
 
         return self
 
+    @torch.inference_mode()
     def apply_measurement(self, measurement: Measurement) -> "BatchedQuantumSystem":
         """Apply measurement to all state vectors in the batch.
 
@@ -124,6 +126,7 @@ class BatchedQuantumSystem:
 
         return self
 
+    @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "BatchedQuantumSystem":
         """Apply a single operation to all state vectors."""
         if isinstance(operation, Gate):
@@ -146,6 +149,7 @@ class BatchedQuantumSystem:
 
         return self
 
+    @torch.inference_mode()
     def apply_circuit(self, circuit: Circuit) -> "BatchedQuantumSystem":
         """Apply a circuit to all state vectors."""
         for operation in circuit.operations:
@@ -204,6 +208,7 @@ class BatchedQuantumSystem:
         return counts
 
 
+@torch.inference_mode()
 def run_simulation(initial_system: QuantumSystem, circuit: Circuit, num_shots: int) -> dict[str, int]:
     """Run a quantum circuit simulation multiple times and collect measurement results.
 
@@ -282,6 +287,7 @@ class QuantumSystem:
         values = torch.multinomial(distribution, num_shots, replacement=True)
         return [int(x.item()) for x in values[0]]
 
+    @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "QuantumSystem":
         #print(f"Applying operation {self.ops_done}")
         self.ops_done = self.ops_done + 1
@@ -297,6 +303,7 @@ class QuantumSystem:
         else:
             return self
 
+    @torch.inference_mode()
     def apply_measurement(self, measurement: Measurement) -> "QuantumSystem":
         """Note: this will collapse |ψ⟩ state at that qubit.
         """
@@ -331,6 +338,7 @@ class QuantumSystem:
 
         return self
 
+    @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "QuantumSystem":
         """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
         targets = gate.targets
@@ -386,6 +394,7 @@ class QuantumSystem:
 
         return self
 
+    @torch.inference_mode()
     def apply_circuit(self, circuit: Circuit) -> "QuantumSystem":
         for operation in circuit.operations:
             if isinstance(operation, Circuit):
