@@ -3,8 +3,6 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from quantum.system import QuantumSystem
-import torch
-
 
 def plot_results(results: dict[str, int], title: str = "Quantum Measurement Results", show: bool = True) -> tuple[Figure, Axes]:
     """Plot simulation results as a bar chart.

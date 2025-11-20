@@ -65,5 +65,5 @@ qs = QuantumSystem(4, 3)
 #print(qs)
 #_ = plot_probs(qs)
 
-result = run_simulation(qs, circuit, 1000)
+result = run_simulation(qs, circuit, 10)
 _ = plot_results(result)

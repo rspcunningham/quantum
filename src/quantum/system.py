@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from typing import Annotated, cast, override
+from collections.abc import Sequence
 import torch
 import numpy as np
 import numpy.typing as npt
 from quantum.gates import Gate, Measurement, ConditionalGate
-from torch.fx.node import Target
 
 class Circuit:
     operations: list[Gate | ConditionalGate | Measurement | Circuit]
 
-    def __init__(self, operations: list[Gate | ConditionalGate | Measurement | Circuit]):
-        self.operations = operations
+    def __init__(self, operations: Sequence[Gate | ConditionalGate | Measurement | Circuit]):
+        self.operations = list(operations)
 
 
 class BatchedQuantumSystem:
@@ -239,6 +239,7 @@ class QuantumSystem:
     n_bits: int
     dimensions: int
     device: torch.device
+    ops_done: int
 
     def __init__(self, n_qubits: int, n_bits: int = 0, state_vector: torch.Tensor | None = None):
         if n_qubits <= 0:
@@ -265,6 +266,7 @@ class QuantumSystem:
         self.n_qubits = n_qubits
         self.n_bits = n_bits
         self.dimensions = 2 ** self.n_qubits
+        self.ops_done = 0
 
     def get_distribution(self) -> torch.Tensor:
         return torch.abs(self.state_vector) ** 2
@@ -281,6 +283,9 @@ class QuantumSystem:
         return [int(x.item()) for x in values[0]]
 
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "QuantumSystem":
+        #print(f"Applying operation {self.ops_done}")
+        self.ops_done = self.ops_done + 1
+
         if isinstance(operation, Gate):
             return self.apply_gate(operation)
 
