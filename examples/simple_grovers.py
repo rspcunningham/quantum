@@ -1,8 +1,6 @@
-from numpy.ma.core import diff
 from quantum import QuantumSystem, Circuit, run_simulation
-from quantum.visualization import plot_results, plot_probs
-from quantum.gates import H, CX, RY, Measurement, CCX, X, ControlledGateType
-import math
+from quantum.visualization import plot_results
+from quantum.gates import H, Measurement, CCX, X, ControlledGateType
 
 
 # 3-bit search space
