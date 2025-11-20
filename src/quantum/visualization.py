@@ -21,27 +21,27 @@ def plot_results(results: dict[str, int], title: str = "Quantum Measurement Resu
     counts = list(sorted_results.values())
 
     # Create figure
-    fig, ax = plt.subplots(figsize=(max(10, len(states) * 0.5), 6)) # pyright: ignore[reportUnknownMemberType]
+    fig, ax = plt.subplots(figsize=(max(10, len(states) * 0.5), 6))
 
     # Create bar plot with seaborn
     _ = sns.barplot(x=states, y=counts, ax=ax)
 
     # Customize
-    _ = ax.set_xlabel("Measurement Outcome (Bit String)", fontsize=12) # pyright: ignore[reportUnknownMemberType]
-    _ = ax.set_ylabel("Count", fontsize=12) # pyright: ignore[reportUnknownMemberType]
-    _ = ax.set_title(title, fontsize=14, fontweight='bold') # pyright: ignore[reportUnknownMemberType]
+    _ = ax.set_xlabel("Measurement Outcome (Bit String)", fontsize=12)
+    _ = ax.set_ylabel("Count", fontsize=12)
+    _ = ax.set_title(title, fontsize=14, fontweight='bold')
 
     # Rotate x-axis labels if there are many states
     if len(states) > 8:
-        _ = plt.xticks(rotation=45, ha='right') # pyright: ignore[reportUnknownMemberType]
+        _ = plt.xticks(rotation=45, ha='right')
 
     # Add count labels on top of bars
     for i, count in enumerate(counts):
-        _ = ax.text(i, count, str(count), ha='center', va='bottom', fontsize=10) # pyright: ignore[reportUnknownMemberType]
+        _ = ax.text(i, count, str(count), ha='center', va='bottom', fontsize=10)
 
     plt.tight_layout()
 
     if show:
-        plt.show() # pyright: ignore[reportUnknownMemberType]
+        plt.show()
 
     return fig, ax

@@ -20,6 +20,7 @@ dependencies = [
 packages = ["src/quantum"]
 
 [tool.basedpyright]
+reportUnknownMemberType = false
 
 [dependency-groups]
 dev = [
