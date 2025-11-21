@@ -2,7 +2,6 @@ from quantum import QuantumSystem, Circuit, run_simulation
 from quantum.visualization import plot_results
 from quantum.gates import H, Measurement, CCX, X, ControlledGateType
 
-
 # 4-bit search space
 # search register = 0, 1, 2, 3
 # ancilla = 4

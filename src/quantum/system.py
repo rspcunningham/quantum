@@ -15,6 +15,22 @@ class Circuit:
     def __init__(self, operations: Sequence[Gate | ConditionalGate | Measurement | Circuit]):
         self.operations = list(operations)
 
+    def uncomputed(self):
+        reversed_operations = self.operations[::-1]
+        new_operations = []
+        for op in reversed_operations:
+            if isinstance(op, Circuit):
+                new_operations.append(op.uncomputed())
+            else:
+                new_operations.append(op)
+
+        return Circuit(new_operations)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Circuit):
+            return NotImplemented
+        return self.operations == other.operations
+
 
 class BatchedQuantumSystem:
     """A batched quantum system that processes multiple state vectors in parallel."""

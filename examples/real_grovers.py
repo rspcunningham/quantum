@@ -1,5 +1,5 @@
 from quantum import QuantumSystem, Circuit, run_simulation
-from quantum.gates import H, X, I, CX, Gate, Measurement, ControlledGateType, GateType
+from quantum.gates import H, X, I, CX, Measurement, ControlledGateType, GateType
 from quantum.visualization import plot_results
 import math
 import time
@@ -8,12 +8,8 @@ import time
 # Utilities
 #######################
 
-def xor(in_1: int, in_2: int, out: int) -> list[Gate]:
-    return [CX(in_1, out), CX(in_2, out)]
-
-def uncompute(circuit: Circuit) -> Circuit:
-    ops_list = circuit.operations
-    return Circuit(list(reversed(ops_list)))
+def xor(in_1: int, in_2: int, out: int) -> Circuit:
+    return Circuit([CX(in_1, out), CX(in_2, out)])
 
 def get_controller(n_controls: int, gate_type: GateType | ControlledGateType) -> GateType | ControlledGateType:
     if n_controls == 0: return gate_type
@@ -32,7 +28,7 @@ def get_if_qubitstring_gate(test_qubits: list[int], if_value: list[int], store_q
     return Circuit([
         test_gates,
         get_controller(len(test_qubits), X)( *test_qubits, store_qubit ),
-        uncompute(test_gates)
+        test_gates.uncomputed()
     ])
 
 #######################
@@ -60,14 +56,14 @@ def classical_hash(input_bits: list[int]) -> list[int]:
 def get_qhash(input_register: list[int], working_register: list[int], hash_register: list[int]) -> Circuit:
 
      return Circuit([
-        *xor(input_register[0], input_register[2], working_register[0]),
-        *xor(input_register[1], input_register[3], working_register[1]),
-        *xor(input_register[0], input_register[1], working_register[2]),
-        *xor(input_register[2], input_register[3], working_register[3]),
-        *xor(working_register[0], input_register[3], hash_register[0]),
-        *xor(working_register[1], input_register[0], hash_register[1]),
-        *xor(working_register[2], input_register[2], hash_register[2]),
-        *xor(working_register[3], input_register[1], hash_register[3])
+        xor(input_register[0], input_register[2], working_register[0]),
+        xor(input_register[1], input_register[3], working_register[1]),
+        xor(input_register[0], input_register[1], working_register[2]),
+        xor(input_register[2], input_register[3], working_register[3]),
+        xor(working_register[0], input_register[3], hash_register[0]),
+        xor(working_register[1], input_register[0], hash_register[1]),
+        xor(working_register[2], input_register[2], hash_register[2]),
+        xor(working_register[3], input_register[1], hash_register[3])
     ])
 
 def get_init(input_register: list[int], ancilla: int) -> Circuit:
@@ -88,7 +84,7 @@ def get_oracle(
     return Circuit([
         qhash,
         get_if_qubitstring_gate(hash_register, target_hash, ancilla),
-        uncompute(qhash)
+        qhash.uncomputed()
     ])
 
 def get_diffuser(input_register: list[int]) -> Circuit:

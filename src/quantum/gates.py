@@ -25,6 +25,14 @@ class Gate:
         """
         return ConditionalGate(self, classical_bit)
 
+    def __eq__(self, other):
+        if not isinstance(other, Gate):
+            return False
+        return torch.allclose(self.tensor, other.tensor) and self.targets == other.targets
+
+    def __hash__(self):
+        return hash((tuple(self.tensor.flatten().tolist()), tuple(self.targets)))
+
 class GateType:
     tensor: torch.Tensor
 
