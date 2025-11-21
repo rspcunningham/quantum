@@ -109,6 +109,7 @@ def get_measure_all(qubits_to_measure: list[int]) -> Circuit:
 input_register = [0, 1, 2, 3]
 working_register = [4, 5, 6, 7]
 hash_register = [8, 9, 10, 11]
+
 target_hash = [0, 1, 1, 0]
 
 total_qubits = len(input_register) + len(working_register) + len(hash_register) + 1
