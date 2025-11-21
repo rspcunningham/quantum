@@ -56,6 +56,8 @@ circuit = Circuit([
     diffuser,
     oracle,
     diffuser,
+    oracle,
+    diffuser,
     measurement
 ])
 
