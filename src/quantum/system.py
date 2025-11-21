@@ -26,6 +26,7 @@ class Circuit:
 
         return Circuit(new_operations)
 
+    @override
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Circuit):
             return NotImplemented
