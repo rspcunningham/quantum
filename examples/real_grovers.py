@@ -4,9 +4,10 @@ from quantum.visualization import plot_results
 import math
 import time
 
-################
+#######################
 # Utilities
-################
+#######################
+
 def xor(in_1: int, in_2: int, out: int) -> list[Gate]:
     return [CX(in_1, out), CX(in_2, out)]
 
@@ -34,9 +35,9 @@ def get_if_qubitstring_gate(test_qubits: list[int], if_value: list[int], store_q
         uncompute(test_gates)
     ])
 
-################
+#######################
 # Functions
-################
+#######################
 
 def classical_hash(input_bits: list[int]) -> list[int]:
 
@@ -100,6 +101,10 @@ def get_diffuser(input_register: list[int]) -> Circuit:
 def get_measure_all(qubits_to_measure: list[int]) -> Circuit:
     ops_list = [Measurement(n, i) for i, n in enumerate(qubits_to_measure)]
     return Circuit(ops_list)
+
+#######################
+# Implementation
+#######################
 
 # 4 bit search register
 # 4 bit hash intermediate register
