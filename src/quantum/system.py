@@ -17,7 +17,7 @@ class Circuit:
 
     def uncomputed(self):
         reversed_operations = self.operations[::-1]
-        new_operations = []
+        new_operations: list[Gate | ConditionalGate | Measurement | Circuit] = []
         for op in reversed_operations:
             if isinstance(op, Circuit):
                 new_operations.append(op.uncomputed())
