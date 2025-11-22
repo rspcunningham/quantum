@@ -1,5 +1,5 @@
-from quantum.system import QuantumSystem, Circuit, run_simulation
+from quantum.system import QuantumSystem, Circuit
 
 __all__ = [
-    "QuantumSystem", "Circuit", "run_simulation"
+    "QuantumSystem", "Circuit"
 ]

@@ -1,4 +1,4 @@
-from quantum import QuantumSystem, Circuit, run_simulation
+from quantum import QuantumSystem, Circuit
 from quantum.gates import H, X, I, CX, Measurement, ControlledGateType, GateType
 from quantum.visualization import plot_results
 import math
@@ -136,10 +136,12 @@ qs = QuantumSystem(total_qubits, len(input_register))
 print(f"Applying {iterations} iterations")
 
 start_time = time.time()
-result = run_simulation(qs, circuit, 100)
+qs = qs.apply_circuit(circuit)
 end_time = time.time()
 
 print(f"time: {end_time - start_time}")
+
+result = qs.get_results()
 
 most_likely = max(result, key=lambda x: result[x])
 most_likely = bits = [int(c) for c in most_likely]

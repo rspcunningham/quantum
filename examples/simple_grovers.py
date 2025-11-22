@@ -1,4 +1,4 @@
-from quantum import QuantumSystem, Circuit, run_simulation
+from quantum import QuantumSystem, Circuit
 from quantum.visualization import plot_results
 from quantum.gates import H, Measurement, CCX, X, ControlledGateType
 
@@ -61,9 +61,7 @@ circuit = Circuit([
 ])
 
 qs = QuantumSystem(5, 4)
-#_ = qs.apply_circuit(circuit)
-#print(qs)
-#_ = plot_probs(qs)
+qs = qs.apply_circuit(circuit)
 
-result = run_simulation(qs, circuit, 100)
+result = qs.get_results()
 _ = plot_results(result)
