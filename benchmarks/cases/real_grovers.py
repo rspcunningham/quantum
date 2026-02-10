@@ -1,6 +1,5 @@
-"""Benchmark case definitions for the quantum simulator."""
+"""Grover's hash-preimage search: 13 qubits, deep oracle circuit."""
 
-from dataclasses import dataclass
 import math
 
 from quantum import (
@@ -8,23 +7,13 @@ from quantum import (
     QuantumRegister,
     registers,
     H, X, I,
-    CX, CCX,
+    CX,
     ControlledGateType,
     GateType,
     measure_all,
 )
+from benchmarks.cases import BenchmarkCase
 
-
-@dataclass
-class BenchmarkCase:
-    name: str
-    circuit: Circuit
-    expected: dict[str, float]
-    n_qubits: int | None = None
-    tolerance: float = 0.05
-
-
-# ── Helpers (from real_grovers example) ──────────────────────────────
 
 def _xor(in_1: int, in_2: int, out: int) -> Circuit:
     return CX(in_1, out) + CX(in_2, out)
@@ -123,38 +112,6 @@ def _compute_grovers_expected(target_hash: list[int]) -> dict[str, float]:
     return {preimage: per_solution for preimage in preimages}
 
 
-# ── Cases ────────────────────────────────────────────────────────────
-
-def bell_state() -> BenchmarkCase:
-    qr = QuantumRegister(2)
-    circuit = H(qr[0]) + CX(qr[0], qr[1]) + measure_all(qr)
-    return BenchmarkCase(
-        name="bell_state",
-        circuit=circuit,
-        expected={"00": 0.5, "11": 0.5},
-    )
-
-
-def simple_grovers() -> BenchmarkCase:
-    search, ancilla = registers(4, 1)
-    anc = ancilla[0]
-
-    CCCX = ControlledGateType(CCX)
-    CCCCX = ControlledGateType(CCCX)
-
-    init = H.on(search) + X(anc) + H(anc)
-    oracle = CCCCX(*search, anc)
-    diffuser = H.on(search) + X.on(search) + CCCCX(*search, anc) + X.on(search) + H.on(search)
-
-    circuit = init + (oracle + diffuser) * 3 + measure_all(search)
-    return BenchmarkCase(
-        name="simple_grovers",
-        circuit=circuit,
-        expected={"1111": 0.96},
-        tolerance=0.06,
-    )
-
-
 def real_grovers() -> BenchmarkCase:
     input_reg, working_reg, hash_reg, ancilla = registers(4, 4, 4, 1)
     anc = ancilla[0]
@@ -178,8 +135,3 @@ def real_grovers() -> BenchmarkCase:
         n_qubits=total_qubits,
         tolerance=0.06,
     )
-
-
-# ── Registry ─────────────────────────────────────────────────────────
-
-ALL_CASES = [bell_state, simple_grovers, real_grovers]

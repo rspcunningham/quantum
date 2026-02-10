@@ -1,14 +1,18 @@
 # Quantum Simulator
 
-A state-vector quantum circuit simulator built from scratch with PyTorch.
+A state-vector quantum circuit simulator built from scratch with PyTorch, targeting Apple Silicon (MPS) as a first-class backend.
+
+## Why this exists
+
+1. **There isn't a good MPS-native quantum simulator.** Qiskit and Cirq target CUDA. This project aims to build a performant simulator that runs well on Apple GPUs via PyTorch's MPS backend.
+
+2. **This is a testbed for coding-agent-driven optimization.** The simulator ships with a benchmark harness, and the development workflow uses Claude Code to iteratively propose, implement, and validate performance improvements. The goal is to see how far a coding agent can push the performance of a real codebase through repeated optimize-measure-evaluate cycles.
 
 ## Architecture
 
-The simulator has two layers:
+**API layer** (`src/quantum/gates.py`) — circuit-building primitives. Gates (`H`, `X`, `CX`, etc.), parametric gates (`RX`, `RY`, `RZ`), arbitrary controlled gates via `ControlledGateType`, measurements, conditional gates, quantum registers, and `Circuit` composition with `+`, `*`, and `.inverse()`.
 
-**API layer** (`gates.py`) — defines the circuit-building primitives. Gates (`H`, `X`, `CX`, etc.), parametric gates (`RX`, `RY`, `RZ`), arbitrary controlled gates via `ControlledGateType`, measurements, conditional gates, quantum registers, and `Circuit` composition with `+`, `*`, and `.inverse()`.
-
-**Simulation layer** (`system.py`) — executes circuits against state vectors. `QuantumSystem` handles single-shot simulation. `BatchedQuantumSystem` runs many shots in parallel as a single `(batch_size, 2^n)` tensor, making it efficient on GPU. `run_simulation()` is the main entry point.
+**Simulation layer** (`src/quantum/system.py`) — executes circuits against state vectors. `BatchedQuantumSystem` runs many shots in parallel as a single `(batch_size, 2^n)` tensor. `run_simulation()` is the main entry point.
 
 ```python
 from quantum import QuantumRegister, H, CX, run_simulation, measure_all
@@ -19,13 +23,9 @@ result = run_simulation(circuit, 1000)
 # {'00': 503, '11': 497}
 ```
 
-Gates are unitary matrices applied via Kronecker products. Measurements are projective collapses. All operations maintain normalized state vectors. Big-endian qubit ordering (qubit 0 is the leftmost bit).
-
-Supports CUDA, MPS, and CPU backends (auto-detected).
+Big-endian qubit ordering (qubit 0 is the leftmost bit). Supports CUDA, MPS, and CPU backends (auto-detected).
 
 ## Benchmark
-
-The `benchmarks/` directory contains a harness for evaluating simulator performance:
 
 ```bash
 uv run bench          # run all cases, print totals
@@ -33,28 +33,56 @@ uv run bench -v       # verbose: per-case timing + correctness details
 uv run bench-plot     # plot the most recent results
 ```
 
-Each benchmark case defines a circuit and its theoretical output distribution. The harness runs every case at 1, 10, 100, and 1000 shots, timing each. Correctness is verified at 1000 shots by comparing the observed distribution against the expected one within a tolerance.
+Each benchmark case defines a circuit and its theoretical output distribution. The harness runs every case at 1, 10, 100, and 1000 shots, timing each. Correctness is verified at 1000 shots by comparing the observed distribution against the expected one within a tolerance. Results are JSONL in `benchmarks/results/`.
 
-Results are written as JSONL to `benchmarks/results/`, one file per run, one line per case:
+### Cases
 
-```json
-{"case": "bell_state", "n_qubits": 2, "times_s": {"1": 0.01, "10": 0.04, "100": 0.19, "1000": 1.84}, "correct": true}
-{"case": "simple_grovers", "n_qubits": 5, "times_s": {"1": 0.15, "10": 0.20, "100": 0.57, "1000": 4.26}, "correct": true}
-{"case": "real_grovers", "n_qubits": 13, "times_s": {"1": 137.1, "10": 139.0, "100": 175.4, "1000": 528.5}, "correct": true}
-```
+| Case | Qubits | What it tests |
+|------|--------|---------------|
+| `bell_state` | 2 | Minimal circuit, baseline overhead |
+| `simple_grovers` | 5 | Multi-controlled gates (Grover's search) |
+| `real_grovers` | 13 | Deep circuit with hash oracle (Grover's preimage search) |
+| `ghz_state` | 12 | Qubit scaling with shallow circuit (H + CX chain) |
+| `qft` | 10 | Parametric controlled phase gates (QFT round-trip) |
+| `teleportation` | 3 | Mid-circuit measurement and conditional gates |
 
-Current cases: Bell state (2 qubits), Grover's search (5 qubits), and Grover's with a hash oracle (13 qubits).
+Cases live in `benchmarks/cases/`, one file each.
 
 ## Optimization workflow
 
-The benchmark exists to support an iterative optimization loop driven by a coding agent (Claude Code). The cycle is:
+The core development loop:
 
-1. Run `uv run bench -v` to establish a baseline
-2. Have the agent propose and implement a performance optimization in `system.py`
-3. Re-run the benchmark to measure the impact
-4. If correctness holds and times improve, keep the change; otherwise revert
+1. **Baseline** — run `uv run bench -v` and commit
+2. **Optimize** — the coding agent reads `system.py`, proposes and implements a change
+3. **Validate** — re-run the benchmark; check correctness and timing
+4. **Commit or revert** — keep improvements, discard regressions
+5. **Repeat**
 
 The multiple shot counts (1, 10, 100, 1000) surface optimizations that behave differently at different batch sizes. The correctness check guards against regressions.
+
+### For coding agents
+
+If you are a coding agent working on this project:
+
+- The optimization target is `src/quantum/system.py`. Do not modify `gates.py` or the benchmark cases.
+- Run `uv run bench -v` before and after every change. Always commit before modifying code.
+- The benchmark must pass all correctness checks. A faster but incorrect simulator is useless.
+- Focus on `BatchedQuantumSystem` — that's what `run_simulation()` uses.
+- Key bottleneck: the current implementation builds full 2^n x 2^n matrices for every gate via Kronecker products and swap matrices. This is O(4^n) per gate application. State-vector simulators typically avoid this by reshaping the state into an n-dimensional tensor and contracting directly on target qubit dimensions.
+
+## Performance tracker
+
+Baseline on Apple M1 Max, 32 GB, MPS backend:
+
+| Case | Qubits | 1 shot | 10 shots | 100 shots | 1000 shots | Correct |
+|------|--------|--------|----------|-----------|------------|---------|
+| bell_state | 2 | 0.007s | 0.047s | 0.193s | 1.974s | PASS |
+| simple_grovers | 5 | 0.148s | 0.204s | 0.572s | 4.262s | PASS |
+| real_grovers | 13 | 137.1s | 139.0s | 175.4s | 528.5s | PASS |
+
+**Total (1000 shots): 534.8s**
+
+*New cases (ghz_state, qft, teleportation) pending first run.*
 
 ## Setup
 
