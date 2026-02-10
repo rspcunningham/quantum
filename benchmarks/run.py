@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import resource
 import subprocess
 import sys
 import time
@@ -63,13 +64,17 @@ def count_ops(circuit: Circuit) -> dict[str, int]:
     return counts
 
 
-def get_memory_mb(device: torch.device) -> float | None:
-    """Get current GPU memory allocation in MB."""
+def get_memory_stats(device: torch.device) -> dict[str, float]:
+    """Get GPU memory stats in MB. Returns empty dict for CPU."""
+    stats: dict[str, float] = {}
     if device.type == "cuda":
-        return torch.cuda.memory_allocated(device) / 1024 / 1024
-    if device.type == "mps":
-        return torch.mps.current_allocated_memory() / 1024 / 1024
-    return None
+        stats["allocated_mb"] = torch.cuda.memory_allocated(device) / 1024 / 1024
+        stats["max_allocated_mb"] = torch.cuda.max_memory_allocated(device) / 1024 / 1024
+        stats["reserved_mb"] = torch.cuda.memory_reserved(device) / 1024 / 1024
+    elif device.type == "mps":
+        stats["allocated_mb"] = torch.mps.current_allocated_memory() / 1024 / 1024
+        stats["driver_mb"] = torch.mps.driver_allocated_memory() / 1024 / 1024
+    return stats
 
 
 def check_correctness(
@@ -93,6 +98,40 @@ def check_correctness(
     return (len(errors) == 0, errors)
 
 
+def run_profile(
+    case: BenchmarkCase,
+    device: torch.device,
+    output_dir: Path,
+) -> None:
+    """Run a single 1-shot pass under torch.profiler and dump a Chrome trace."""
+    n_qubits = case.n_qubits
+
+    # Warmup
+    run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
+    sync_device(device)
+
+    trace_path = output_dir / f"profile_{case.name}.json"
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            *(
+                [torch.profiler.ProfilerActivity.CUDA]
+                if device.type == "cuda" else []
+            ),
+        ],
+        record_shapes=True,
+        with_stack=True,
+    ) as prof:
+        run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
+        sync_device(device)
+
+    prof.export_chrome_trace(str(trace_path))
+    print(f"  trace: {trace_path}")
+
+    # Print top operators
+    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=15))
+
+
 def run_case(
     case: BenchmarkCase,
     device: torch.device,
@@ -111,7 +150,7 @@ def run_case(
     times: dict[str, float] = {}
     cpu_times: dict[str, float] = {}
     result_max: dict[str, int] | None = None
-    peak_memory_mb: float | None = None
+    memory_stats: dict[str, float] = {}
 
     for shots in SHOT_COUNTS:
         sync_device(device)
@@ -127,22 +166,30 @@ def run_case(
 
         if shots == max(SHOT_COUNTS):
             result_max = result
-            peak_memory_mb = get_memory_mb(device)
+            memory_stats = get_memory_stats(device)
 
     assert result_max is not None
     correct, errors = check_correctness(result_max, case.expected, case.tolerance)
+
+    # Derived metrics at 1000 shots
+    wall_1k = times[str(max(SHOT_COUNTS))]
+    cpu_1k = cpu_times[str(max(SHOT_COUNTS))]
+    ops_per_sec = round(total_ops / wall_1k, 1) if wall_1k > 0 else 0
+    cpu_util = round(cpu_1k / wall_1k, 3) if wall_1k > 0 else 0
 
     if verbose:
         shots_str = "    ".join(
             f"{s} \u2192 {times[str(s)]:.3f}s (cpu: {cpu_times[str(s)]:.3f}s)"
             for s in SHOT_COUNTS
         )
-        mem_str = f"{peak_memory_mb:.1f} MB" if peak_memory_mb is not None else "n/a"
+        mem_parts = [f"{k}: {v:.1f}" for k, v in memory_stats.items()]
+        mem_str = ", ".join(mem_parts) if mem_parts else "n/a"
         print(f"\n{case.name} ({display_qubits} qubits, {total_ops} ops)")
-        print(f"  shots:  {shots_str}")
-        print(f"  memory: {mem_str}")
+        print(f"  shots:    {shots_str}")
+        print(f"  ops/s:    {ops_per_sec}  |  cpu util: {cpu_util}")
+        print(f"  memory:   {mem_str}")
         status = "PASS" if correct else f"FAIL \u2014 {'; '.join(errors)}"
-        print(f"  correctness: {status}")
+        print(f"  correct:  {status}")
 
     return {
         "case": case.name,
@@ -150,7 +197,9 @@ def run_case(
         "ops": ops,
         "times_s": times,
         "cpu_times_s": cpu_times,
-        "peak_memory_mb": round(peak_memory_mb, 2) if peak_memory_mb is not None else None,
+        "ops_per_sec": ops_per_sec,
+        "cpu_util": cpu_util,
+        "memory": {k: round(v, 2) for k, v in memory_stats.items()},
         "correct": correct,
     }
 
@@ -158,6 +207,7 @@ def run_case(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Quantum simulator benchmark")
     parser.add_argument("-v", "--verbose", action="store_true", help="Per-case timing and correctness details")
+    parser.add_argument("--profile", action="store_true", help="Run torch.profiler on each case (separate 1-shot pass, not timed)")
     args = parser.parse_args()
 
     device = get_device()
@@ -185,6 +235,12 @@ def main() -> None:
         shots_str = "    ".join(f"{s} \u2192 {totals[s]:.2f}s" for s in SHOT_COUNTS)
         print(f"\nTotal time by shot count:\n    {shots_str}")
 
+        # Process-level stats
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        # macOS reports ru_maxrss in bytes, Linux in KB
+        peak_rss_mb = rusage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else rusage.ru_maxrss / 1024
+        print(f"Peak RSS: {peak_rss_mb:.0f} MB")
+
     if failures:
         print(f"\nFAILED: {', '.join(failures)}")
 
@@ -199,6 +255,17 @@ def main() -> None:
             f.write(json.dumps(r) + "\n")
 
     print(f"Wrote {output_path}")
+
+    # Profiling pass (separate from timed benchmark)
+    if args.profile:
+        print("\n--- Profiling (1-shot per case, not timed) ---")
+        for case_fn in ALL_CASES:
+            case = case_fn()
+            print(f"\n{case.name}:")
+            try:
+                run_profile(case, device, results_dir)
+            except Exception as e:
+                print(f"  ERROR: {e}")
 
     if failures:
         sys.exit(1)
