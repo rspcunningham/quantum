@@ -1,15 +1,6 @@
-from quantum import Circuit, QuantumSystem, run_simulation
-from quantum.visualization import plot_results
-from quantum.gates import H, CX, Measurement
+from quantum import run_simulation, QuantumRegister, H, CX, measure_all, plot_results
 
-circuit = Circuit([
-    H(0),
-    CX(0, 1),
-    Measurement(0, 0),
-    Measurement(1, 1),
-])
-
-qs = QuantumSystem(2, 2)
-
-result = run_simulation(qs, circuit, 1000)
+qr = QuantumRegister(2)
+circuit = H(qr[0]) + CX(qr[0], qr[1]) + measure_all(qr)
+result = run_simulation(circuit, 1000)
 _ = plot_results(result)

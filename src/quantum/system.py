@@ -7,30 +7,52 @@ from collections.abc import Sequence
 import torch
 import numpy as np
 import numpy.typing as npt
-from quantum.gates import Gate, Measurement, ConditionalGate
+from quantum.gates import Gate, Measurement, ConditionalGate, QuantumRegister, Circuit
 
-class Circuit:
-    operations: list[Gate | ConditionalGate | Measurement | Circuit]
 
-    def __init__(self, operations: Sequence[Gate | ConditionalGate | Measurement | Circuit]):
-        self.operations = list(operations)
+def infer_resources(circuit: Circuit) -> tuple[int, int]:
+    """Infer (n_qubits, n_bits) by walking all operations recursively."""
+    max_qubit = -1
+    max_bit = -1
 
-    def uncomputed(self):
-        reversed_operations = self.operations[::-1]
-        new_operations: list[Gate | ConditionalGate | Measurement | Circuit] = []
-        for op in reversed_operations:
+    def _walk(ops: Sequence[Gate | ConditionalGate | Measurement | Circuit]) -> None:
+        nonlocal max_qubit, max_bit
+        for op in ops:
             if isinstance(op, Circuit):
-                new_operations.append(op.uncomputed())
+                _walk(op.operations)
+            elif isinstance(op, Gate):
+                for t in op.targets:
+                    if t > max_qubit:
+                        max_qubit = t
+            elif isinstance(op, Measurement):
+                if op.qubit > max_qubit:
+                    max_qubit = op.qubit
+                if op.bit > max_bit:
+                    max_bit = op.bit
             else:
-                new_operations.append(op)
+                # ConditionalGate — walk the inner gate
+                for t in op.gate.targets:
+                    if t > max_qubit:
+                        max_qubit = t
 
-        return Circuit(new_operations)
+    _walk(circuit.operations)
+    return (max_qubit + 1, max_bit + 1)
 
-    @override
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Circuit):
-            return NotImplemented
-        return self.operations == other.operations
+
+def measure_all(qubits: QuantumRegister | list[int] | int) -> Circuit:
+    """Measure qubits into sequential classical bits starting at 0.
+
+    measure_all(qr)           # all qubits in register -> bits 0..n-1
+    measure_all(qr[0:4])      # sub-register
+    measure_all(4)             # qubits 0-3 (shorthand)
+    """
+    if isinstance(qubits, int):
+        indices = list(range(qubits))
+    elif isinstance(qubits, QuantumRegister):
+        indices = list(qubits)
+    else:
+        indices = list(qubits)
+    return Circuit([Measurement(q, i) for i, q in enumerate(indices)])
 
 
 class BatchedQuantumSystem:
@@ -226,31 +248,51 @@ class BatchedQuantumSystem:
 
 
 @torch.inference_mode()
-def run_simulation(initial_system: QuantumSystem, circuit: Circuit, num_shots: int) -> dict[str, int]:
+def run_simulation(
+    circuit: Circuit,
+    num_shots: int,
+    *,
+    n_qubits: int | None = None,
+    n_bits: int | None = None,
+    device: torch.device | None = None,
+) -> dict[str, int]:
     """Run a quantum circuit simulation multiple times and collect measurement results.
 
     This uses a batched approach to parallelize operations across all shots on the GPU.
 
     Args:
-        initial_system: The initial quantum system state
         circuit: The circuit to apply
         num_shots: Number of times to run the simulation
+        n_qubits: Number of qubits (inferred from circuit if not provided)
+        n_bits: Number of classical bits (inferred from circuit if not provided)
+        device: Torch device to use (auto-detected if not provided)
 
     Returns:
         Dictionary mapping bit strings to their counts
     """
-    # Create batched system
+    if n_qubits is None or n_bits is None:
+        inferred_qubits, inferred_bits = infer_resources(circuit)
+        if n_qubits is None:
+            n_qubits = inferred_qubits
+        if n_bits is None:
+            n_bits = inferred_bits
+
+    if device is None:
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else
+            "mps"  if torch.backends.mps.is_available() else
+            "cpu"
+        )
+
     batched_system = BatchedQuantumSystem(
-        n_qubits=initial_system.n_qubits,
-        n_bits=initial_system.n_bits,
+        n_qubits=n_qubits,
+        n_bits=n_bits,
         batch_size=num_shots,
-        device=initial_system.device
+        device=device,
     )
 
-    # Apply circuit to all state vectors at once
     _ = batched_system.apply_circuit(circuit)
 
-    # Collect results
     return batched_system.get_results()
 
 

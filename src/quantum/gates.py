@@ -1,11 +1,62 @@
+from __future__ import annotations
+
 import torch
 import math
-from typing import Callable, cast
+from collections.abc import Iterator, Sequence
+from typing import Callable, cast, overload, override
 
 def _complex_matrix(data: list[list[complex | int | float]]) -> torch.Tensor:
     return torch.tensor(data, dtype=torch.complex64)
 
 expand_diagonal = cast(Callable[..., torch.Tensor], torch.block_diag)
+
+
+class QuantumRegister:
+    """A named group of qubits with auto-assigned indices."""
+    _offset: int
+    _size: int
+
+    def __init__(self, size: int, offset: int = 0):
+        self._offset = offset
+        self._size = size
+
+    @overload
+    def __getitem__(self, key: int) -> int: ...
+    @overload
+    def __getitem__(self, key: slice) -> QuantumRegister: ...
+    def __getitem__(self, key: int | slice) -> int | QuantumRegister:
+        if isinstance(key, int):
+            if key < 0:
+                key = self._size + key
+            if key < 0 or key >= self._size:
+                raise IndexError(f"Register index {key} out of range [0, {self._size})")
+            return self._offset + key
+        # key is a slice
+        indices = range(self._size)[key]
+        if len(indices) == 0:
+            return QuantumRegister(0, self._offset)
+        return QuantumRegister(len(indices), self._offset + indices[0])
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self._offset, self._offset + self._size))
+
+    def __len__(self) -> int:
+        return self._size
+
+
+def registers(*sizes: int) -> tuple[QuantumRegister, ...]:
+    """Create multiple contiguous quantum registers with auto-assigned indices.
+
+    input_reg, working_reg, ancilla = registers(4, 4, 1)
+    # input_reg: qubits 0-3, working_reg: qubits 4-7, ancilla: qubit 8
+    """
+    offset = 0
+    regs: list[QuantumRegister] = []
+    for size in sizes:
+        regs.append(QuantumRegister(size, offset=offset))
+        offset += size
+    return tuple(regs)
+
 
 class Gate:
     tensor: torch.Tensor
@@ -18,20 +69,26 @@ class Gate:
         self.tensor = tensor
         self.targets = list(targets)
 
-    def if_(self, classical_bit: int) -> 'ConditionalGate':
+    def if_(self, classical_bit: int) -> ConditionalGate:
         """Make this gate conditional on a classical bit being 1.
 
         Usage: H(0).if_(classical_bit=0)
         """
         return ConditionalGate(self, classical_bit)
 
-    def __eq__(self, other):
+    def __add__(self, other: Gate | Measurement | ConditionalGate | Circuit) -> Circuit:
+        return Circuit([self, other])
+
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, Gate):
             return False
-        return torch.allclose(self.tensor, other.tensor) and self.targets == other.targets
+        return bool(torch.allclose(self.tensor, other.tensor)) and self.targets == other.targets
 
-    def __hash__(self):
-        return hash((tuple(self.tensor.flatten().tolist()), tuple(self.targets)))
+    @override
+    def __hash__(self) -> int:
+        data: list[float] = [float(x) for x in self.tensor.flatten()]
+        return hash((tuple(data), tuple(self.targets)))
 
 class GateType:
     tensor: torch.Tensor
@@ -41,6 +98,23 @@ class GateType:
 
     def __call__(self, *targets: int) -> Gate:
         return Gate(self.tensor, *targets)
+
+    def on(self, *qubits: int | QuantumRegister) -> Circuit:
+        """Apply this single-qubit gate to each qubit independently.
+
+        H.on(qr)         # all qubits in register
+        H.on(qr[0:3])    # slice of register
+        H.on(0, 1, 2)    # raw ints still work
+        """
+        if self.tensor.shape[0] != 2:
+            raise ValueError("on() is only supported for single-qubit gates")
+        expanded: list[int] = []
+        for q in qubits:
+            if isinstance(q, QuantumRegister):
+                expanded.extend(q)
+            else:
+                expanded.append(q)
+        return Circuit([Gate(self.tensor, q) for q in expanded])
 
 class ParametricGateType:
     matrix_fn: Callable[[torch.Tensor], torch.Tensor]
@@ -57,7 +131,7 @@ class ParametricGateType:
 class ControlledGateType:
     tensor: torch.Tensor
 
-    def __init__(self, base_gate: 'GateType | ControlledGateType'):
+    def __init__(self, base_gate: GateType | ControlledGateType):
         # Controlled gate = identity on control=0, base gate on control=1
         # This expands the gate matrix by one qubit
         eye = torch.eye(base_gate.tensor.shape[0], dtype=torch.complex64)
@@ -102,6 +176,9 @@ class Measurement:
         self.qubit = qubit
         self.bit = bit
 
+    def __add__(self, other: Gate | Measurement | ConditionalGate | Circuit) -> Circuit:
+        return Circuit([self, other])
+
 class ConditionalGate:
     """A gate that only executes if the classical register equals the condition value."""
     gate: Gate
@@ -110,3 +187,42 @@ class ConditionalGate:
     def __init__(self, gate: Gate, condition: int):
         self.gate = gate
         self.condition = condition
+
+    def __add__(self, other: Gate | Measurement | ConditionalGate | Circuit) -> Circuit:
+        return Circuit([self, other])
+
+
+class Circuit:
+    operations: list[Gate | ConditionalGate | Measurement | Circuit]
+
+    def __init__(self, operations: Sequence[Gate | ConditionalGate | Measurement | Circuit]):
+        self.operations = list(operations)
+
+    def inverse(self) -> Circuit:
+        reversed_operations = self.operations[::-1]
+        new_operations: list[Gate | ConditionalGate | Measurement | Circuit] = []
+        for op in reversed_operations:
+            if isinstance(op, Circuit):
+                new_operations.append(op.inverse())
+            else:
+                new_operations.append(op)
+
+        return Circuit(new_operations)
+
+    def __add__(self, other: Gate | Measurement | ConditionalGate | Circuit) -> Circuit:
+        return Circuit([self, other])
+
+    def __radd__(self, other: Gate | Measurement | ConditionalGate) -> Circuit:
+        return Circuit([other, self])
+
+    def __mul__(self, n: int) -> Circuit:
+        return Circuit([self] * n)
+
+    def __rmul__(self, n: int) -> Circuit:
+        return Circuit([self] * n)
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Circuit):
+            return NotImplemented
+        return self.operations == other.operations
