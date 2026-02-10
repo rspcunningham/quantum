@@ -16,8 +16,12 @@ dependencies = [
     "torch>=2.9.0",
 ]
 
+[project.scripts]
+bench = "benchmarks.run:main"
+bench-plot = "benchmarks.plot:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/quantum"]
+packages = ["src/quantum", "benchmarks"]
 
 [tool.basedpyright]
 reportUnknownMemberType = false

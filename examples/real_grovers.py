@@ -68,8 +68,8 @@ def get_oracle(
     qhash = get_qhash(input_reg, working_reg, hash_reg)
     return qhash + get_if_qubitstring_gate(hash_reg, target_hash, ancilla) + qhash.inverse()
 
-def get_diffuser(input_reg: QuantumRegister) -> Circuit:
-    controller = get_controller(len(input_reg), X)(*input_reg, len(input_reg))
+def get_diffuser(input_reg: QuantumRegister, ancilla: int) -> Circuit:
+    controller = get_controller(len(input_reg), X)(*input_reg, ancilla)
     return H.on(input_reg) + X.on(input_reg) + controller + X.on(input_reg) + H.on(input_reg)
 
 #######################
@@ -87,7 +87,7 @@ iterations = math.floor(math.pi / 4 * math.sqrt(search_space))
 
 init = H.on(input_reg) + X(anc) + H(anc)
 oracle = get_oracle(input_reg, working_reg, hash_reg, target_hash, anc)
-diffuser = get_diffuser(input_reg)
+diffuser = get_diffuser(input_reg, anc)
 
 circuit = init + (oracle + diffuser) * iterations + measure_all(input_reg)
 

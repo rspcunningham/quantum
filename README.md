@@ -1,235 +1,67 @@
 # Quantum Simulator
 
-A pedagogical quantum circuit simulator built from first principles using PyTorch.
+A state-vector quantum circuit simulator built from scratch with PyTorch.
 
-## What is this?
+## Architecture
 
-A pure state-vector quantum simulator that exposes the underlying linear algebra without abstractions. Built for learning how quantum computing actually works at the mathematical level.
+The simulator has two layers:
 
-## Features
+**API layer** (`gates.py`) — defines the circuit-building primitives. Gates (`H`, `X`, `CX`, etc.), parametric gates (`RX`, `RY`, `RZ`), arbitrary controlled gates via `ControlledGateType`, measurements, conditional gates, quantum registers, and `Circuit` composition with `+`, `*`, and `.inverse()`.
 
-- **Pure implementation** - No external quantum libraries, just PyTorch tensors
-- **Full state vector simulation** - Explicit Kronecker products and unitary evolution
-- **GPU-accelerated batch simulation** - Run thousands of shots in parallel
-- **Hybrid quantum-classical** - Quantum registers + classical bit storage with conditional gates
-- **Device flexibility** - Automatic selection of CUDA, MPS, or CPU
-- **Clear visualization** - Dirac notation state representation + matplotlib plotting
-- **Type-safe** - Full type annotations with jaxtyping for tensor shapes
-
-## Quick Start
-
-### Single Shot Simulation
+**Simulation layer** (`system.py`) — executes circuits against state vectors. `QuantumSystem` handles single-shot simulation. `BatchedQuantumSystem` runs many shots in parallel as a single `(batch_size, 2^n)` tensor, making it efficient on GPU. `run_simulation()` is the main entry point.
 
 ```python
-from quantum import QuantumSystem, Circuit
-from quantum.gates import H, CX, Measurement
+from quantum import QuantumRegister, H, CX, run_simulation, measure_all
 
-# Create a 2-qubit system with 2 classical bits
-qs = QuantumSystem(n_qubits=2, n_bits=2)
-
-# Build a Bell state circuit
-circuit = Circuit([
-    H(0),                 # Hadamard on qubit 0
-    CX(0, 1),             # CNOT: control=0, target=1
-    Measurement(0, 0),    # Measure qubit 0 → classical bit 0
-    Measurement(1, 1),    # Measure qubit 1 → classical bit 1
-])
-
-# Run the circuit
-qs.apply_circuit(circuit)
-print(qs)  # See the quantum state in Dirac notation
+qr = QuantumRegister(2)
+circuit = H(qr[0]) + CX(qr[0], qr[1]) + measure_all(qr)
+result = run_simulation(circuit, 1000)
+# {'00': 503, '11': 497}
 ```
 
-### Multi-Shot Simulation with Visualization
+Gates are unitary matrices applied via Kronecker products. Measurements are projective collapses. All operations maintain normalized state vectors. Big-endian qubit ordering (qubit 0 is the leftmost bit).
 
-```python
-from quantum import QuantumSystem, Circuit, run_simulation
-from quantum.visualization import plot_results
-from quantum.gates import H, CX, RY, Measurement
-import math
+Supports CUDA, MPS, and CPU backends (auto-detected).
 
-# Create circuit
-circuit = Circuit([
-    H(0),
-    CX(0, 1),
-    RY(math.pi/4)(0),     # Parametric gate: angle first, then target
-    Measurement(0, 0),
-    Measurement(1, 1)
-])
+## Benchmark
 
-# Run 1000 shots with GPU acceleration
-initial_system = QuantumSystem(n_qubits=2, n_bits=2)
-counts = run_simulation(initial_system, circuit, num_shots=1000)
+The `benchmarks/` directory contains a harness for evaluating simulator performance:
 
-# Visualize results
-plot_results(counts, title="Bell State Measurement")
-
-# Print distribution
-for state, count in sorted(counts.items()):
-    print(f"{state}: {count} ({count/10:.1f}%)")
+```bash
+uv run bench          # run all cases, print totals
+uv run bench -v       # verbose: per-case timing + correctness details
+uv run bench-plot     # plot the most recent results
 ```
 
-## Available Gates
+Each benchmark case defines a circuit and its theoretical output distribution. The harness runs every case at 1, 10, 100, and 1000 shots, timing each. Correctness is verified at 1000 shots by comparing the observed distribution against the expected one within a tolerance.
 
-### Single-Qubit Gates
-**Predefined:** `I`, `H`, `X`, `Y`, `Z`, `S`, `T`
+Results are written as JSONL to `benchmarks/results/`, one file per run, one line per case:
 
-```python
-from quantum.gates import H, X, Y, Z, S, T
-H(0)  # Apply Hadamard to qubit 0
+```json
+{"case": "bell_state", "n_qubits": 2, "times_s": {"1": 0.01, "10": 0.04, "100": 0.19, "1000": 1.84}, "correct": true}
+{"case": "simple_grovers", "n_qubits": 5, "times_s": {"1": 0.15, "10": 0.20, "100": 0.57, "1000": 4.26}, "correct": true}
+{"case": "real_grovers", "n_qubits": 13, "times_s": {"1": 137.1, "10": 139.0, "100": 175.4, "1000": 528.5}, "correct": true}
 ```
 
-### Parametric Rotation Gates
-**Rotations:** `RX(θ)`, `RY(θ)`, `RZ(θ)`
+Current cases: Bell state (2 qubits), Grover's search (5 qubits), and Grover's with a hash oracle (13 qubits).
 
-```python
-from quantum.gates import RX, RY, RZ
-import math
-RY(math.pi/2)(0)  # First call with angle, then with target qubit
+## Optimization workflow
 
-# Alternatively, define a gate for the specific angle needed
-RYT = RY(math.pi/2)
-RYT(0)
-```
+The benchmark exists to support an iterative optimization loop driven by a coding agent (Claude Code). The cycle is:
 
-### Multi-Qubit Gates
-**Predefined:** `CX` (CNOT), `CCX` (Toffoli)
+1. Run `uv run bench -v` to establish a baseline
+2. Have the agent propose and implement a performance optimization in `system.py`
+3. Re-run the benchmark to measure the impact
+4. If correctness holds and times improve, keep the change; otherwise revert
 
-```python
-from quantum.gates import CX, CCX
-CX(0, 1)     # Control: qubit 0, Target: qubit 1
-CCX(0, 1, 2) # Controls: qubits 0,1, Target: qubit 2
-```
+The multiple shot counts (1, 10, 100, 1000) surface optimizations that behave differently at different batch sizes. The correctness check guards against regressions.
 
-### Creating Controlled Gates
-**Any gate can be made controlled:**
+## Setup
 
-```python
-from quantum.gates import ControlledGateType, Z, Y
-CZ = ControlledGateType(Z)  # Create controlled-Z
-CY = ControlledGateType(Y)  # Create controlled-Y
-CZ(0, 1)  # Apply controlled-Z
-```
-
-### Conditional Gates
-**Execute gates based on classical bits:**
-
-```python
-from quantum.gates import X, H
-X(0).if_(0)      # Apply X to qubit 0 only if classical bit register == 0 (ie 00000)
-H(1).if_(2)      # Apply H to qubit 1 only if classical bit register == 2 (ie 00010)
-```
-
-### Measurements
-**Collapse quantum state to classical:**
-
-```python
-from quantum import Measurement
-Measurement(qubit_index, classical_bit_index)
-```
-
-## Core API
-
-### QuantumSystem
-
-Main class for single quantum state simulation.
-
-```python
-qs = QuantumSystem(n_qubits=3, n_bits=3)
-qs.apply_gate(H(0))                    # Apply single gate
-qs.apply_measurement(Measurement(0, 0)) # Measure and collapse
-qs.apply_circuit(circuit)               # Apply entire circuit
-print(qs)                               # Pretty-print state
-probs = qs.get_distribution()           # Get probability distribution
-samples = qs.sample(num_shots=100)      # Sample from current state
-```
-
-### Circuit
-
-Container for quantum operations.
-
-```python
-from quantum import Circuit
-circuit = Circuit([
-    H(0),
-    CX(0, 1),
-    X(2).if_(0),         # Conditional gate
-    Measurement(1, 1),
-    Circuit([...])        # Circuits can be nested
-])
-```
-
-### run_simulation
-
-High-level function for GPU-accelerated multi-shot simulation.
-
-```python
-from quantum import run_simulation
-
-counts = run_simulation(
-    initial_system=QuantumSystem(n_qubits=2, n_bits=2),
-    circuit=circuit,
-    num_shots=1000
-)
-# Returns: {'00': 503, '11': 497, ...}
-```
-
-### Visualization
-
-Plot measurement results with matplotlib.
-
-```python
-from quantum.visualization import plot_results
-
-fig, ax = plot_results(
-    results=counts,
-    title="Measurement Results",
-    show=True  # Display immediately
-)
-```
-
-## How It Works
-
-This simulator implements quantum mechanics using linear algebra:
-
-1. **State vectors**: Complex-valued tensors of shape (2^n, 1)
-2. **Gates**: Unitary matrices applied via Kronecker products
-3. **Measurements**: Projection operators with probabilistic collapse
-4. **Batching**: Parallel simulation of multiple shots on GPU
-
-All operations preserve unitarity and maintain normalized states. The implementation uses big-endian qubit ordering (qubit 0 is leftmost bit).
-
-## Purpose
-
-This is an educational tool for understanding quantum mechanics and quantum computing fundamentals. The implementation prioritizes clarity over performance.
-
-**Use this to:**
-- Learn how quantum gates work mathematically
-- Prototype small quantum algorithms
-- Teach quantum computing concepts
-- Understand state vector simulation
-
-**Don't use this for:**
-- Large-scale simulations (>14 qubits depending on the size of your gpu)
-- Production code
-- Performance benchmarking
-
-## Requirements
-
-- Python 3.13+
-- PyTorch >= 2.9.0
-- NumPy >= 2.3.4
-- Matplotlib >= 3.9.2
-- Seaborn >= 0.13.2
-
-## Installation
-
-Using uv is reccomended:
 ```bash
 uv sync
 ```
 
-to run the demo script:
-```bash
-uv run main.py
-```
+## Examples
+
+See `examples/` for standalone scripts: a Bell state, a simple Grover's search, and a full Grover's hash-preimage search.
