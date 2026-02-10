@@ -103,33 +103,33 @@ def run_profile(
     device: torch.device,
     output_dir: Path,
 ) -> None:
-    """Run a single 1-shot pass under torch.profiler and dump a Chrome trace."""
+    """Run profiled passes at each shot count and dump Chrome traces."""
     n_qubits = case.n_qubits
+    activities = [
+        torch.profiler.ProfilerActivity.CPU,
+        *(
+            [torch.profiler.ProfilerActivity.CUDA]
+            if device.type == "cuda" else []
+        ),
+    ]
 
     # Warmup
     run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
     sync_device(device)
 
-    trace_path = output_dir / f"profile_{case.name}.json"
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            *(
-                [torch.profiler.ProfilerActivity.CUDA]
-                if device.type == "cuda" else []
-            ),
-        ],
-        record_shapes=True,
-        with_stack=True,
-    ) as prof:
-        run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
-        sync_device(device)
+    for shots in SHOT_COUNTS:
+        trace_path = output_dir / f"profile_{case.name}_{shots}.json"
+        with torch.profiler.profile(
+            activities=activities,
+            record_shapes=True,
+            with_stack=True,
+        ) as prof:
+            run_simulation(case.circuit, shots, n_qubits=n_qubits, device=device)
+            sync_device(device)
 
-    prof.export_chrome_trace(str(trace_path))
-    print(f"  trace: {trace_path}")
-
-    # Print top operators
-    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=15))
+        prof.export_chrome_trace(str(trace_path))
+        print(f"  [{shots} shots] {trace_path}")
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
 
 def run_case(
