@@ -136,6 +136,7 @@ def run_case(
     case: BenchmarkCase,
     device: torch.device,
     verbose: bool,
+    git_hash: str,
 ) -> dict:
     n_qubits = case.n_qubits
     display_qubits = n_qubits if n_qubits is not None else infer_resources(case.circuit)[0]
@@ -193,6 +194,8 @@ def run_case(
 
     return {
         "case": case.name,
+        "git_hash": git_hash,
+        "device": device.type,
         "n_qubits": display_qubits,
         "ops": ops,
         "times_s": times,
@@ -220,7 +223,7 @@ def main() -> None:
     for case_fn in ALL_CASES:
         case = case_fn()
         try:
-            result = run_case(case, device, args.verbose)
+            result = run_case(case, device, args.verbose, git_hash)
         except Exception as e:
             print(f"\nERROR in {case.name}: {e}")
             failures.append(case.name)

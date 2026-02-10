@@ -52,11 +52,12 @@ Cases live in `benchmarks/cases/`, one file each.
 
 The core development loop:
 
-1. **Baseline** — run `uv run bench -v` and commit
-2. **Optimize** — the coding agent reads `system.py`, proposes and implements a change
-3. **Validate** — re-run the benchmark; check correctness and timing
-4. **Commit or revert** — keep improvements, discard regressions
-5. **Repeat**
+1. **Reason** — review benchmark data, code, and prior runs
+2. **Hypothesize** — decide one concrete change to test
+3. **Implement** — apply the change in `src/quantum/system.py`
+4. **Commit** — commit before running benchmarks
+5. **Benchmark** — run `uv run bench -v` and evaluate correctness + timing
+6. **Repeat** — use results to drive the next hypothesis
 
 The multiple shot counts (1, 10, 100, 1000) surface optimizations that behave differently at different batch sizes. The correctness check guards against regressions.
 
