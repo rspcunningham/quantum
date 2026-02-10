@@ -82,49 +82,40 @@ class BatchedQuantumSystem:
 
     @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
-        """Apply a gate to all state vectors in the batch.
+        """Apply a gate to all state vectors via tensor contraction.
 
-        state_vectors shape: (batch_size, 2^n)
-        gate_full shape: (2^n, 2^n)
-
-        We want: new_state_vectors[i] = gate_full @ state_vectors[i]
-        Equivalent: state_vectors @ gate_full.T (but more efficient for the gpu)
+        Reshapes the state from (batch, 2^n) to (batch, 2, 2, ..., 2),
+        permutes target qubit axes to the end, reshapes to 2D, and does
+        a single matmul.  No Kronecker products, no swap matrices.
+        O(2^n) per gate instead of O(4^n).
         """
         targets = gate.targets
         tensor = gate.tensor.to(self.device)
-        n_targets = len(targets)
+        k = len(targets)
+        n = self.n_qubits
 
-        # Build the full gate matrix (same logic as QuantumSystem)
-        swaps: list[torch.Tensor] = []
-        positions = list(range(self.n_qubits))
+        # Reshape state: (batch, 2^n) -> (batch, 2, 2, ..., 2)
+        state = self.state_vectors.view((self.batch_size,) + (2,) * n)
 
-        for i in range(n_targets):
-            target = targets[i]
-            desired_pos = i
-            cur_pos = positions.index(target)
+        # Move target qubit axes to the end: (batch, non_targets..., targets...)
+        non_targets = [i for i in range(n) if i not in targets]
+        perm = [0] + [i + 1 for i in non_targets] + [t + 1 for t in targets]
+        state = state.permute(perm)
 
-            if cur_pos != desired_pos:
-                S = self._get_swap_matrix(cur_pos, desired_pos)
-                swaps.append(S)
-                positions[cur_pos], positions[desired_pos] = positions[desired_pos], positions[cur_pos]
+        # Flatten to 2D for matmul: (batch * 2^{n-k}, 2^k)
+        state = state.reshape(-1, 1 << k)
 
-        # Apply swaps to all state vectors
-        # (batch_size, 2^n) @ (2^n, 2^n)^T = (batch_size, 2^n)
-        for u in swaps:
-            self.state_vectors = self.state_vectors @ u.T
+        # Apply gate: (batch * 2^{n-k}, 2^k) @ (2^k, 2^k)^T
+        state = state @ tensor.T
 
-        # Apply gate to all state vectors
-        gate_full = self._gate_to_qubit(tensor, n_targets)
-        self.state_vectors = self.state_vectors @ gate_full.T
+        # Reshape back to (batch, 2, ..., 2) in permuted order, then restore
+        state = state.reshape((self.batch_size,) + (2,) * n)
+        inv_perm = [0] * (n + 1)
+        for new_pos, old_pos in enumerate(perm):
+            inv_perm[old_pos] = new_pos
+        state = state.permute(inv_perm)
 
-        # Undo swaps
-        for u in reversed(swaps):
-            self.state_vectors = self.state_vectors @ u.T
-
-        # Renormalize
-        norms = torch.sqrt(torch.sum(torch.abs(self.state_vectors) ** 2, dim=1, keepdim=True))
-        self.state_vectors = self.state_vectors / norms
-
+        self.state_vectors = state.reshape(self.batch_size, -1)
         return self
 
     @torch.inference_mode()
