@@ -98,40 +98,6 @@ def check_correctness(
     return (len(errors) == 0, errors)
 
 
-def run_profile(
-    case: BenchmarkCase,
-    device: torch.device,
-    output_dir: Path,
-) -> None:
-    """Run profiled passes at each shot count and dump Chrome traces."""
-    n_qubits = case.n_qubits
-    activities = [
-        torch.profiler.ProfilerActivity.CPU,
-        *(
-            [torch.profiler.ProfilerActivity.CUDA]
-            if device.type == "cuda" else []
-        ),
-    ]
-
-    # Warmup
-    run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
-    sync_device(device)
-
-    for shots in SHOT_COUNTS:
-        trace_path = output_dir / f"profile_{case.name}_{shots}.json"
-        with torch.profiler.profile(
-            activities=activities,
-            record_shapes=True,
-            with_stack=True,
-        ) as prof:
-            run_simulation(case.circuit, shots, n_qubits=n_qubits, device=device)
-            sync_device(device)
-
-        prof.export_chrome_trace(str(trace_path))
-        print(f"  [{shots} shots] {trace_path}")
-        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-
-
 def run_case(
     case: BenchmarkCase,
     device: torch.device,
@@ -210,7 +176,6 @@ def run_case(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Quantum simulator benchmark")
     parser.add_argument("-v", "--verbose", action="store_true", help="Per-case timing and correctness details")
-    parser.add_argument("--profile", action="store_true", help="Run torch.profiler on each case (separate 1-shot pass, not timed)")
     args = parser.parse_args()
 
     device = get_device()
@@ -258,17 +223,6 @@ def main() -> None:
             f.write(json.dumps(r) + "\n")
 
     print(f"Wrote {output_path}")
-
-    # Profiling pass (separate from timed benchmark)
-    if args.profile:
-        print("\n--- Profiling (1-shot per case, not timed) ---")
-        for case_fn in ALL_CASES:
-            case = case_fn()
-            print(f"\n{case.name}:")
-            try:
-                run_profile(case, device, results_dir)
-            except Exception as e:
-                print(f"  ERROR: {e}")
 
     if failures:
         sys.exit(1)

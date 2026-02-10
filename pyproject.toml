@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 bench = "benchmarks.run:main"
 bench-plot = "benchmarks.plot:main"
+bench-trace = "benchmarks.trace:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantum", "benchmarks"]

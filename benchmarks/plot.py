@@ -1,5 +1,6 @@
 """Plot benchmark results from a JSONL file."""
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -67,8 +68,6 @@ def plot(results: list[dict], output_path: Path) -> None:
 
 
 def main() -> None:
-    import argparse
-
     parser = argparse.ArgumentParser(description="Plot benchmark results")
     parser.add_argument("file", nargs="?", help="Path to a .jsonl results file (default: latest)")
     args = parser.parse_args()
