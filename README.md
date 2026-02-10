@@ -65,24 +65,13 @@ The multiple shot counts (1, 10, 100, 1000) surface optimizations that behave di
 If you are a coding agent working on this project:
 
 - The optimization target is `src/quantum/system.py`. Do not modify `gates.py` or the benchmark cases.
-- Run `uv run bench -v` before and after every change. Always commit before modifying code.
+- Run `uv run bench -v` after every change. Always commit after modifying code but before running the benchmark.
 - The benchmark must pass all correctness checks. A faster but incorrect simulator is useless.
-- Focus on `BatchedQuantumSystem` — that's what `run_simulation()` uses.
-- Key bottleneck: the current implementation builds full 2^n x 2^n matrices for every gate via Kronecker products and swap matrices. This is O(4^n) per gate application. State-vector simulators typically avoid this by reshaping the state into an n-dimensional tensor and contracting directly on target qubit dimensions.
+- Before making code changes, develop a well-reasoned hypothesis about the potential impact on performance. After running the benchmark, compare the results with previous runs to evaluate the effectiveness of the optimization and the accuracy of the hypothesis. Use this information to construct your next hypothesis and guide future optimizations.
 
 ## Performance tracker
 
-Baseline on Apple M1 Max, 32 GB, MPS backend:
-
-| Case | Qubits | 1 shot | 10 shots | 100 shots | 1000 shots | Correct |
-|------|--------|--------|----------|-----------|------------|---------|
-| bell_state | 2 | 0.007s | 0.047s | 0.193s | 1.974s | PASS |
-| simple_grovers | 5 | 0.148s | 0.204s | 0.572s | 4.262s | PASS |
-| real_grovers | 13 | 137.1s | 139.0s | 175.4s | 528.5s | PASS |
-
-**Total (1000 shots): 534.8s**
-
-*New cases (ghz_state, qft, teleportation) pending first run.*
+Experimental results on Apple M1 Max, 32 GB, MPS backend coming soon.
 
 ## Setup
 
