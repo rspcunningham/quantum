@@ -108,7 +108,8 @@ Latest optimization session (Apple M1 Max, 32 GB, MPS backend, February 10, 2026
 | `qft` | 20.832s | 0.388s | 53.7x |
 | `teleportation` | 2.221s | 0.043s | 51.8x |
 
-Detailed run log and profiler notes: `docs/optimization-progress-2026-02-10.md`.
+Detailed run log and profiler notes: `docs/02-attempt-history.md`.
+Narrative docs index: `docs/README.md`.
 
 Expanded-suite baseline after benchmark broadening (Apple M1 Max, MPS backend):
 - Run: `benchmarks/results/2026-02-10T230611.jsonl`

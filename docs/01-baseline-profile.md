@@ -1,7 +1,7 @@
-# Baseline Profiler Analysis
+# Baseline Profile (Historical)
 
 Historical note: this document captures the pre-tensor-contraction baseline.
-For the latest post-optimization results, see `docs/optimization-progress-2026-02-10.md`.
+For the latest post-optimization results, see `docs/02-attempt-history.md`.
 
 Profiled with `torch.profiler` on Apple M1 Max, MPS backend, PyTorch 2.9.0.
 
