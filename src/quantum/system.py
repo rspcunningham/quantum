@@ -640,7 +640,6 @@ class BatchedQuantumSystem:
     _diagonal_subindices: dict[tuple[int, ...], torch.Tensor]
     _permutation_source_indices: dict[tuple[tuple[int, ...], int], torch.Tensor]
     _permutation_phase_factors: dict[tuple[tuple[int, ...], int], torch.Tensor]
-    _axis_permutations: dict[tuple[int, ...], tuple[tuple[int, ...], tuple[int, ...]]]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
@@ -657,7 +656,6 @@ class BatchedQuantumSystem:
         self._diagonal_subindices = {}
         self._permutation_source_indices = {}
         self._permutation_phase_factors = {}
-        self._axis_permutations = {}
 
         dim = 1 << n_qubits
         self.state_vectors = torch.zeros((batch_size, dim), dtype=torch.complex64, device=device)
@@ -666,24 +664,20 @@ class BatchedQuantumSystem:
 
     @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
-        """Apply a gate to all state vectors."""
+        """Apply a gate to all state vectors via tensordot contraction."""
         if gate.diagonal is not None:
             return self._apply_diagonal_gate(gate)
         if gate.permutation is not None:
             return self._apply_permutation_gate(gate)
 
         targets = tuple(gate.targets)
-        tensor = self._device_gate_tensor(gate.tensor)
         k = len(targets)
-        n = self.n_qubits
+        gate_nd = self._device_gate_tensor(gate.tensor, n_target_qubits=k)
 
-        state = self.state_vectors.view((self.batch_size,) + (2,) * n)
-        perm, inv_perm = self._axis_permutation_for_targets(targets)
-        state = state.permute(perm)
-        state = state.reshape(-1, 1 << k)
-        state = state @ tensor.T
-        state = state.reshape((self.batch_size,) + (2,) * n)
-        state = state.permute(inv_perm)
+        state = self.state_vectors.view((self.batch_size,) + (2,) * self.n_qubits)
+        axes = tuple(t + 1 for t in targets)
+        state = torch.tensordot(state, gate_nd, dims=(axes, list(range(k, 2 * k))))
+        state = torch.movedim(state, list(range(-k, 0)), list(axes))
 
         self.state_vectors = state.reshape(self.batch_size, -1)
         return self
@@ -762,13 +756,14 @@ class BatchedQuantumSystem:
         self._measurement_weights[qubit] = weight
         return weight
 
-    def _device_gate_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _device_gate_tensor(self, tensor: torch.Tensor, *, n_target_qubits: int) -> torch.Tensor:
         key = id(tensor)
         cached = self._gate_tensors.get(key)
         if cached is not None:
             return cached
 
         moved = tensor if tensor.device == self.device else tensor.to(self.device)
+        moved = moved.reshape((2,) * n_target_qubits + (2,) * n_target_qubits)
         self._gate_tensors[key] = moved
         return moved
 
@@ -802,24 +797,6 @@ class BatchedQuantumSystem:
         moved = factors if factors.device == self.device else factors.to(self.device)
         self._gate_permutation_factors[key] = moved
         return moved
-
-    def _axis_permutation_for_targets(self, targets: tuple[int, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        cached = self._axis_permutations.get(targets)
-        if cached is not None:
-            return cached
-
-        target_set = set(targets)
-        non_targets = tuple(i for i in range(self.n_qubits) if i not in target_set)
-        perm = (0, *(i + 1 for i in non_targets), *(target + 1 for target in targets))
-
-        inv_perm = [0] * (self.n_qubits + 1)
-        for new_pos, old_pos in enumerate(perm):
-            inv_perm[old_pos] = new_pos
-        inv_perm_tuple = tuple(inv_perm)
-
-        cached_value = (perm, inv_perm_tuple)
-        self._axis_permutations[targets] = cached_value
-        return cached_value
 
     def _diagonal_subindex_for_targets(self, targets: tuple[int, ...]) -> torch.Tensor:
         cached = self._diagonal_subindices.get(targets)
