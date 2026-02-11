@@ -664,7 +664,7 @@ class BatchedQuantumSystem:
 
     @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
-        """Apply a gate to all state vectors via tensordot contraction."""
+        """Apply a gate to all state vectors."""
         if gate.diagonal is not None:
             return self._apply_diagonal_gate(gate)
         if gate.permutation is not None:
@@ -672,6 +672,10 @@ class BatchedQuantumSystem:
 
         targets = tuple(gate.targets)
         k = len(targets)
+
+        if k == 1:
+            return self._apply_dense_single_qubit_gate(gate, targets[0])
+
         gate_nd = self._device_gate_tensor(gate.tensor, n_target_qubits=k)
 
         state = self.state_vectors.view((self.batch_size,) + (2,) * self.n_qubits)
@@ -680,6 +684,25 @@ class BatchedQuantumSystem:
         state = torch.movedim(state, list(range(-k, 0)), list(axes))
 
         self.state_vectors = state.reshape(self.batch_size, -1)
+        return self
+
+    def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
+        """Apply a dense single-qubit gate via stride-based slicing (no permutation copies)."""
+        gate_2d = self._device_gate_tensor(gate.tensor, n_target_qubits=1)
+        a = 1 << target
+        b = 1 << (self.n_qubits - target - 1)
+
+        state = self.state_vectors.view(self.batch_size, a, 2, b)
+        s0 = state[:, :, 0, :]
+        s1 = state[:, :, 1, :]
+
+        g00, g01 = gate_2d[0, 0], gate_2d[0, 1]
+        g10, g11 = gate_2d[1, 0], gate_2d[1, 1]
+
+        new_0 = g00 * s0 + g01 * s1
+        new_1 = g10 * s0 + g11 * s1
+
+        self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
         return self
 
     def _apply_diagonal_gate(self, gate: Gate) -> "BatchedQuantumSystem":
