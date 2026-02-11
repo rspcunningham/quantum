@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, cast, override
 from collections.abc import Sequence
+import os
 import torch
 import numpy as np
 import numpy.typing as npt
@@ -81,6 +83,234 @@ def _terminal_measurement_plan(
         gates.append(operation)
 
     return gates, measurements
+
+
+def _dynamic_operation_plan(
+    circuit: Circuit,
+) -> list[Gate | ConditionalGate | Measurement] | None:
+    """Return flattened operations when a dynamic execution path is required."""
+    flattened: list[Gate | ConditionalGate | Measurement] = []
+    _flatten_circuit_operations(circuit.operations, flattened)
+
+    has_conditional = False
+    has_non_terminal_measurement = False
+    seen_measurement = False
+
+    for operation in flattened:
+        if isinstance(operation, ConditionalGate):
+            has_conditional = True
+            continue
+        if isinstance(operation, Measurement):
+            seen_measurement = True
+            continue
+        if seen_measurement:
+            has_non_terminal_measurement = True
+
+    if not has_conditional and not has_non_terminal_measurement:
+        return None
+    return flattened
+
+
+@dataclass
+class _DynamicBranchState:
+    """One branch in dynamic simulation."""
+
+    state_vector: torch.Tensor  # shape: (1, 2^n_qubits), device-resident
+    classical_value: int
+    shots: int
+
+
+def _set_classical_bit(value: int, *, bit: int, outcome: int, n_bits: int) -> int:
+    """Overwrite one classical register bit in big-endian indexing."""
+    if n_bits == 0:
+        return value
+    shift = n_bits - 1 - bit
+    bit_mask = 1 << shift
+    return (value & ~bit_mask) | (outcome << shift)
+
+
+def _merge_dynamic_branches(
+    branches: list[_DynamicBranchState],
+) -> list[_DynamicBranchState]:
+    """Merge branches that share classical value and numerically identical states."""
+    grouped: dict[int, list[_DynamicBranchState]] = {}
+
+    for branch in branches:
+        if branch.shots <= 0:
+            continue
+
+        bucket = grouped.setdefault(branch.classical_value, [])
+        merged = False
+        for existing in bucket:
+            if torch.allclose(existing.state_vector, branch.state_vector, atol=1e-6, rtol=1e-5):
+                existing.shots += branch.shots
+                merged = True
+                break
+        if not merged:
+            bucket.append(
+                _DynamicBranchState(
+                    state_vector=branch.state_vector,
+                    classical_value=branch.classical_value,
+                    shots=branch.shots,
+                )
+            )
+
+    merged_branches: list[_DynamicBranchState] = []
+    for bucket in grouped.values():
+        merged_branches.extend(bucket)
+    return merged_branches
+
+
+def _counts_from_dynamic_branches(
+    branches: list[_DynamicBranchState],
+    *,
+    n_bits: int,
+    num_shots: int,
+) -> dict[str, int]:
+    """Convert dynamic branch shot counts to output bitstring histogram."""
+    if num_shots == 0:
+        return {}
+    if n_bits == 0:
+        return {"": num_shots}
+
+    counts: dict[str, int] = {}
+    for branch in branches:
+        if branch.shots <= 0:
+            continue
+        key = format(branch.classical_value, f"0{n_bits}b")
+        counts[key] = counts.get(key, 0) + branch.shots
+    return counts
+
+
+@torch.inference_mode()
+def _run_dynamic_branch_simulation(
+    *,
+    circuit: Circuit,
+    num_shots: int,
+    n_qubits: int,
+    n_bits: int,
+    device: torch.device,
+) -> dict[str, int] | None:
+    """Branch-based dynamic executor for mid-circuit measurement/conditional circuits."""
+    if os.environ.get("QUANTUM_DISABLE_DYNAMIC_BRANCH_ENGINE") == "1":
+        return None
+
+    operations = _dynamic_operation_plan(circuit)
+    if operations is None:
+        return None
+    if num_shots == 0:
+        return {}
+
+    try:
+        min_qubits_for_branch = int(os.environ.get("QUANTUM_DYNAMIC_BRANCH_MIN_QUBITS", "3"))
+    except ValueError:
+        min_qubits_for_branch = 3
+    if n_qubits < min_qubits_for_branch:
+        return None
+
+    try:
+        branch_cap = int(os.environ.get("QUANTUM_DYNAMIC_BRANCH_CAP", "4096"))
+    except ValueError:
+        branch_cap = 4096
+    if branch_cap <= 0:
+        branch_cap = 4096
+
+    gate_system = BatchedQuantumSystem(
+        n_qubits=n_qubits,
+        n_bits=n_bits,
+        batch_size=1,
+        device=device,
+    )
+    dim = 1 << n_qubits
+    initial_state = torch.zeros((1, dim), dtype=torch.complex64, device=device)
+    initial_state[0, 0] = 1.0
+
+    branches: list[_DynamicBranchState] = [
+        _DynamicBranchState(
+            state_vector=initial_state,
+            classical_value=0,
+            shots=num_shots,
+        )
+    ]
+
+    for operation in operations:
+        if isinstance(operation, Gate):
+            for branch in branches:
+                gate_system.state_vectors = branch.state_vector
+                _ = gate_system.apply_gate(operation)
+                branch.state_vector = gate_system.state_vectors
+            continue
+
+        if isinstance(operation, ConditionalGate):
+            for branch in branches:
+                if branch.classical_value != operation.condition:
+                    continue
+                gate_system.state_vectors = branch.state_vector
+                _ = gate_system.apply_gate(operation.gate)
+                branch.state_vector = gate_system.state_vectors
+            continue
+
+        # Measurement: split branches by sampled outcomes, then merge compatible branches.
+        measurement = operation
+        mask_1 = gate_system._measurement_mask_for_qubit(measurement.qubit)
+        weight_1 = gate_system._measurement_weight_for_qubit(measurement.qubit)
+
+        next_branches: list[_DynamicBranchState] = []
+        for branch in branches:
+            shots = branch.shots
+            if shots <= 0:
+                continue
+
+            probs = torch.abs(branch.state_vector[0]) ** 2
+            p1_tensor = (probs @ weight_1).clamp(0.0, 1.0)
+            p1 = float(p1_tensor.item())
+
+            # Aggregate sampling by branch avoids per-shot conditional indexing.
+            shots_1 = int(np.random.binomial(shots, p1))
+            shots_0 = shots - shots_1
+
+            if shots_0 > 0:
+                state_0 = branch.state_vector.clone()
+                state_0[:, mask_1] = 0
+                norm_0 = torch.sqrt((torch.abs(state_0) ** 2).sum()).clamp_min(1e-12)
+                state_0 = state_0 / norm_0
+                next_branches.append(
+                    _DynamicBranchState(
+                        state_vector=state_0,
+                        classical_value=_set_classical_bit(
+                            branch.classical_value,
+                            bit=measurement.bit,
+                            outcome=0,
+                            n_bits=n_bits,
+                        ),
+                        shots=shots_0,
+                    )
+                )
+
+            if shots_1 > 0:
+                state_1 = branch.state_vector.clone()
+                state_1[:, ~mask_1] = 0
+                norm_1 = torch.sqrt((torch.abs(state_1) ** 2).sum()).clamp_min(1e-12)
+                state_1 = state_1 / norm_1
+                next_branches.append(
+                    _DynamicBranchState(
+                        state_vector=state_1,
+                        classical_value=_set_classical_bit(
+                            branch.classical_value,
+                            bit=measurement.bit,
+                            outcome=1,
+                            n_bits=n_bits,
+                        ),
+                        shots=shots_1,
+                    )
+                )
+
+        branches = _merge_dynamic_branches(next_branches)
+        if len(branches) > branch_cap:
+            # Conservative fallback for branch explosion.
+            return None
+
+    return _counts_from_dynamic_branches(branches, n_bits=n_bits, num_shots=num_shots)
 
 
 def _counts_from_register_codes(
@@ -607,6 +837,16 @@ def run_simulation(
     )
     if sampled is not None:
         return sampled
+
+    dynamic_branch_result = _run_dynamic_branch_simulation(
+        circuit=circuit,
+        num_shots=num_shots,
+        n_qubits=n_qubits,
+        n_bits=n_bits,
+        device=device,
+    )
+    if dynamic_branch_result is not None:
+        return dynamic_branch_result
 
     batched_system = BatchedQuantumSystem(
         n_qubits=n_qubits,

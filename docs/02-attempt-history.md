@@ -21,6 +21,7 @@ This document is the canonical record of what has been tried, what worked, and w
 | 7 | `a6c5d1b` | Expand benchmark to broad synthetic always-on families (no core/extended split). | Suite expanded from 16 configured cases to 24 configured cases (22 runnable on MPS). New expanded baseline @10k: `592.91s`. | Worked (coverage) | `2026-02-10T230611.jsonl` |
 | 8 | `4e4b2cb` | Terminal-measurement sampling fast path: for circuits without conditionals/non-terminal measurements, evolve once and sample many shots from final distribution. | Expanded suite totals: @1000 `60.33s -> 4.76s` (`12.67x`), @10000 `592.91s -> 5.23s` (`113.35x`). 22/22 runnable cases still PASS. | Worked (major) | `2026-02-10T230611.jsonl` vs `2026-02-10T234124.jsonl` |
 | 9 | `7fbe06b` | On MPS terminal-measurement fast path, sample/count on CPU instead of MPS (`multinomial`/`bincount` offload) to avoid backend sampler overhead and sync stalls. | Expanded suite totals: @1000 `4.76s -> 2.96s` (`1.61x`), @10000 `5.23s -> 3.17s` (`1.65x`). 22/22 runnable cases still PASS. | Worked | `2026-02-10T234124.jsonl` vs `2026-02-10T235128.jsonl` |
+| 10 | `c6d7826` (working tree benchmark state) | Implement H2 dynamic branch engine for conditional/mid-circuit execution with branch splitting/merging and fallback heuristics (enabled by default for dynamic circuits with `n_qubits >= 3`). | Expanded suite totals: @1000 `2.96s -> 2.80s` (`1.06x`), @10000 `3.17s -> 3.00s` (`1.06x`). Compare-vs-Aer (full suite) improved from native/aer ratio `5.79x -> 4.99x` at 1000 shots and `1.47x -> 1.05x` at 10000 shots. | Worked (targeted dynamic gain) | `2026-02-10T235128.jsonl` vs `2026-02-11T010850.jsonl`; `compare-2026-02-11T005222.jsonl` vs `compare-2026-02-11T010956.jsonl` |
 
 ## Current Benchmark Scope
 
@@ -40,18 +41,18 @@ Always-on suite now includes:
 
 ## Latest Baseline (Expanded Suite)
 
-Run: `benchmarks/results/2026-02-10T235128.jsonl`
+Run: `benchmarks/results/2026-02-11T010850.jsonl`
 
 - Completed cases: 22
 - Correctness: 22/22 PASS
-- Total @1000: `2.96s`
-- Total @10000: `3.17s`
-- Speedup vs prior expanded baseline (`2026-02-10T230611.jsonl`):
-  - @1000: `20.38x`
-  - @10000: `186.74x`
-- Speedup vs post-H0 baseline (`2026-02-10T234124.jsonl`):
-  - @1000: `1.61x`
-  - @10000: `1.65x`
+- Total @1000: `2.80s`
+- Total @10000: `3.00s`
+- Speedup vs expanded-suite baseline (`2026-02-10T230611.jsonl`):
+  - @1000: `21.55x`
+  - @10000: `197.64x`
+- Speedup vs post-H0.1 baseline (`2026-02-10T235128.jsonl`):
+  - @1000: `1.06x`
+  - @10000: `1.06x`
 
 Known backend-limit failures (not OOM):
 
@@ -67,6 +68,7 @@ What worked:
 3. Terminal-measurement sampling fast path produced the largest single step on the expanded suite by removing shot-scaled unitary replay on static circuits.
 4. On MPS, terminal-measurement sampling/counting offload to CPU removed a backend-specific sampler bottleneck and delivered another broad step improvement.
 5. Cache cleanup/memory-transfer cleanup gave smaller but real gains.
+6. Dynamic branch execution improved dominant dynamic cases (especially `adaptive_feedback_5q` and `teleportation`) and narrowed the external full-suite gap to near parity at 10000 shots.
 
 What did not:
 
