@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Callable
 
+import numpy as np
 import torch
 
 from quantum.gates import Circuit, ConditionalGate, Gate, Measurement, QuantumRegister
@@ -148,6 +149,58 @@ def _compile_execution_graph(circuit: Circuit) -> _DynamicCompiledGraph:
         node_count=node_count,
         terminal_measurements=tuple(terminal_measurements),
     )
+
+
+def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
+    """Replace consecutive diagonal gate runs with a single pre-fused diagonal gate.
+
+    Uses numpy for CPU computation to avoid PyTorch CPU allocations that
+    interfere with MPS command scheduling.
+    """
+    n = len(gates)
+    i = 0
+    has_fusion = False
+    while i < n:
+        if gates[i].diagonal is not None:
+            j = i + 1
+            while j < n and gates[j].diagonal is not None:
+                j += 1
+            if j - i >= 2:
+                has_fusion = True
+                break
+            i = j
+        else:
+            i += 1
+    if not has_fusion:
+        return gates
+
+    dim = 1 << n_qubits
+    indices = np.arange(dim, dtype=np.int64)
+    result: list[Gate] = []
+    i = 0
+    while i < n:
+        if gates[i].diagonal is not None:
+            j = i + 1
+            while j < n and gates[j].diagonal is not None:
+                j += 1
+            if j - i >= 2:
+                factors = np.ones(dim, dtype=np.complex64)
+                for k in range(i, j):
+                    targets = tuple(gates[k].targets)
+                    nk = len(targets)
+                    subindex = np.zeros(dim, dtype=np.int64)
+                    for out_pos, target in enumerate(targets):
+                        bitpos = n_qubits - 1 - target
+                        bit = (indices >> bitpos) & 1
+                        subindex |= bit << (nk - out_pos - 1)
+                    diag_np = gates[k].diagonal.numpy()
+                    factors *= diag_np[subindex]
+                result.append(Gate(None, *list(range(n_qubits)), diagonal=torch.from_numpy(factors)))
+                i = j
+                continue
+        result.append(gates[i])
+        i += 1
+    return tuple(result)
 
 
 def _set_classical_bit(value: int, *, bit: int, outcome: int, n_bits: int) -> int:
@@ -371,7 +424,8 @@ def _advance_branches_with_gate_sequence(
         next_state_id = transition_cache.get(state_id)
         if next_state_id is None:
             gate_system.state_vectors = state_arena[state_id]
-            gate_system.apply_gate_sequence(gates)
+            for gate in gates:
+                _ = gate_system.apply_gate(gate)
             next_state_id = add_state(gate_system.state_vectors)
             transition_cache[state_id] = next_state_id
 
@@ -511,6 +565,33 @@ def _run_compiled_simulation(
         return {}
 
     compiled = _compile_execution_graph(circuit)
+
+    # Preprocess: fuse consecutive diagonal gates into single full-state diagonals
+    fused_steps = []
+    any_changed = False
+    for step in compiled.steps:
+        if isinstance(step, _DynamicSegmentStep):
+            fused_gates = _fuse_segment_diagonals(step.gates, n_qubits)
+            if fused_gates is not step.gates:
+                fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
+                any_changed = True
+            else:
+                fused_steps.append(step)
+        else:
+            fused_steps.append(step)
+    if any_changed:
+        compiled = _DynamicCompiledGraph(
+            steps=tuple(fused_steps),
+            node_count=compiled.node_count,
+            terminal_measurements=compiled.terminal_measurements,
+        )
+        # Pre-transfer fused diagonals to MPS before main loop to avoid
+        # large CPU→MPS copies during interleaved gate application
+        for step in compiled.steps:
+            if isinstance(step, _DynamicSegmentStep):
+                for gate in step.gates:
+                    if gate._diagonal is not None and len(gate.targets) == n_qubits:
+                        gate._diagonal = gate._diagonal.to(device)
 
     gate_system = BatchedQuantumSystem(
         n_qubits=n_qubits,
@@ -653,7 +734,6 @@ class BatchedQuantumSystem:
         self._gate_permutations = {}
         self._gate_permutation_factors = {}
         self._diagonal_subindices = {}
-        self._cpu_diagonal_subindices: dict[tuple[int, ...], torch.Tensor] = {}
         self._permutation_source_indices = {}
         self._permutation_phase_factors = {}
 
@@ -687,53 +767,6 @@ class BatchedQuantumSystem:
 
         self.state_vectors = state.reshape(self.batch_size, -1)
         return self
-
-    @torch.inference_mode()
-    def apply_gate_sequence(self, gates: tuple[Gate, ...]) -> "BatchedQuantumSystem":
-        """Apply a gate sequence with diagonal gate fusion.
-
-        Consecutive diagonal gates are combined into a single factors tensor
-        on CPU and transferred to the device once, eliminating per-gate MPS
-        kernel launch overhead.
-        """
-        n = len(gates)
-        i = 0
-        while i < n:
-            gate = gates[i]
-            if gate.diagonal is None:
-                self.apply_gate(gate)
-                i += 1
-                continue
-            j = i + 1
-            while j < n and gates[j].diagonal is not None:
-                j += 1
-            if j - i == 1:
-                self._apply_diagonal_gate(gate)
-            else:
-                targets0 = tuple(gates[i].targets)
-                subindex0 = self._cpu_diagonal_subindex(targets0)
-                factors = gates[i].diagonal[subindex0].clone()
-                for ki in range(i + 1, j):
-                    targets_k = tuple(gates[ki].targets)
-                    subindex_k = self._cpu_diagonal_subindex(targets_k)
-                    factors.mul_(gates[ki].diagonal[subindex_k])
-                self.state_vectors = self.state_vectors * factors.to(self.device).unsqueeze(0)
-            i = j
-        return self
-
-    def _cpu_diagonal_subindex(self, targets: tuple[int, ...]) -> torch.Tensor:
-        cached = self._cpu_diagonal_subindices.get(targets)
-        if cached is not None:
-            return cached
-        indices = torch.arange(1 << self.n_qubits, dtype=torch.int64)
-        subindex = torch.zeros_like(indices)
-        k = len(targets)
-        for out_pos, target in enumerate(targets):
-            bitpos = self.n_qubits - 1 - target
-            bit = (indices >> bitpos) & 1
-            subindex = subindex | (bit << (k - out_pos - 1))
-        self._cpu_diagonal_subindices[targets] = subindex
-        return subindex
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
         """Apply a dense single-qubit gate via stride-based slicing with CPU scalars."""
@@ -794,6 +827,11 @@ class BatchedQuantumSystem:
 
         targets = tuple(gate.targets)
         k = len(targets)
+
+        if k == self.n_qubits:
+            factors = diagonal if diagonal.device == self.device else diagonal.to(self.device)
+            self.state_vectors = self.state_vectors * factors.unsqueeze(0)
+            return self
 
         if k == 1:
             d0, d1 = complex(diagonal[0]), complex(diagonal[1])
