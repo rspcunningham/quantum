@@ -149,10 +149,13 @@ def _run_terminal_measurement_sampling(
 
     probabilities = torch.abs(system.state_vectors[0]) ** 2
     probabilities = probabilities / probabilities.sum().clamp_min(1e-12)
+    sampling_device = torch.device("cpu") if device.type == "mps" else probabilities.device
+    if probabilities.device != sampling_device:
+        probabilities = probabilities.to(sampling_device)
 
     samples = torch.multinomial(probabilities, num_shots, replacement=True).to(dtype=torch.int64)
 
-    register_codes = torch.zeros(num_shots, dtype=torch.int64, device=device)
+    register_codes = torch.zeros(num_shots, dtype=torch.int64, device=sampling_device)
     for measurement in measurements:
         measured_bit = (samples >> (n_qubits - 1 - measurement.qubit)) & 1
         shift = n_bits - 1 - measurement.bit
