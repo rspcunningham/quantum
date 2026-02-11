@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Annotated, cast, override
 from collections.abc import Sequence
-import os
+from dataclasses import dataclass
+from typing import Annotated, Callable
+
 import torch
-import numpy as np
-import numpy.typing as npt
-from quantum.gates import Gate, Measurement, ConditionalGate, QuantumRegister, Circuit
+
+from quantum.gates import Circuit, ConditionalGate, Gate, Measurement, QuantumRegister
 
 
 def infer_resources(circuit: Circuit) -> tuple[int, int]:
@@ -23,19 +22,18 @@ def infer_resources(circuit: Circuit) -> tuple[int, int]:
             if isinstance(op, Circuit):
                 _walk(op.operations)
             elif isinstance(op, Gate):
-                for t in op.targets:
-                    if t > max_qubit:
-                        max_qubit = t
+                for target in op.targets:
+                    if target > max_qubit:
+                        max_qubit = target
             elif isinstance(op, Measurement):
                 if op.qubit > max_qubit:
                     max_qubit = op.qubit
                 if op.bit > max_bit:
                     max_bit = op.bit
             else:
-                # ConditionalGate — walk the inner gate
-                for t in op.gate.targets:
-                    if t > max_qubit:
-                        max_qubit = t
+                for target in op.gate.targets:
+                    if target > max_qubit:
+                        max_qubit = target
 
     _walk(circuit.operations)
     return (max_qubit + 1, max_bit + 1)
@@ -53,38 +51,6 @@ def _flatten_circuit_operations(
             out.append(operation)
 
 
-def _terminal_measurement_plan(
-    circuit: Circuit,
-) -> tuple[list[Gate], list[Measurement]] | None:
-    """Return (unitary_gates, terminal_measurements) when fast-path eligible.
-
-    Eligible circuits have:
-    - no ConditionalGate operations
-    - no gates after the first measurement
-    """
-    flattened: list[Gate | ConditionalGate | Measurement] = []
-    _flatten_circuit_operations(circuit.operations, flattened)
-
-    gates: list[Gate] = []
-    measurements: list[Measurement] = []
-    seen_measurement = False
-
-    for operation in flattened:
-        if isinstance(operation, ConditionalGate):
-            return None
-        if isinstance(operation, Measurement):
-            seen_measurement = True
-            measurements.append(operation)
-            continue
-
-        # Gate
-        if seen_measurement:
-            return None
-        gates.append(operation)
-
-    return gates, measurements
-
-
 @dataclass(frozen=True, slots=True)
 class _DynamicSegmentStep:
     """Unitary edge: contiguous unconditional gate sequence."""
@@ -94,7 +60,7 @@ class _DynamicSegmentStep:
 
 @dataclass(frozen=True, slots=True)
 class _DynamicConditionalStep:
-    """Control node edge: contiguous gates for one classical condition."""
+    """Control edge: contiguous gates for one classical condition."""
 
     condition: int
     gates: tuple[Gate, ...]
@@ -102,7 +68,7 @@ class _DynamicConditionalStep:
 
 @dataclass(frozen=True, slots=True)
 class _DynamicMeasurementStep:
-    """Control node: measurement barrier that may split paths."""
+    """Control node: measurement barrier that may split branch paths."""
 
     measurement: Measurement
 
@@ -119,27 +85,20 @@ class _DynamicCompiledGraph:
     terminal_measurements: tuple[Measurement, ...]
 
 
-def _compile_dynamic_execution_graph(
-    circuit: Circuit,
-) -> _DynamicCompiledGraph:
-    """Compile any circuit into edge/node execution steps.
-
-    This preserves program order while grouping contiguous gate runs into segment
-    edges so branch paths can reuse static-style gate kernels.
-    """
+def _compile_execution_graph(circuit: Circuit) -> _DynamicCompiledGraph:
+    """Compile any circuit into segment/conditional/measurement steps."""
     flattened: list[Gate | ConditionalGate | Measurement] = []
     _flatten_circuit_operations(circuit.operations, flattened)
 
     terminal_start = len(flattened)
     while terminal_start > 0 and isinstance(flattened[terminal_start - 1], Measurement):
         terminal_start -= 1
-    terminal_measurements = tuple(
-        cast(Measurement, op) for op in flattened[terminal_start:]
-    )
+    terminal_measurements = tuple(flattened[terminal_start:])
     active_operations = flattened[:terminal_start]
 
     steps: list[_DynamicGraphStep] = []
     node_count = 0
+
     pending_gates: list[Gate] = []
     pending_condition: int | None = None
     pending_conditional_gates: list[Gate] = []
@@ -176,7 +135,6 @@ def _compile_dynamic_execution_graph(
             pending_conditional_gates.append(operation.gate)
             continue
 
-        # Measurement node
         _flush_segment()
         _flush_conditional()
         steps.append(_DynamicMeasurementStep(measurement=operation))
@@ -188,7 +146,7 @@ def _compile_dynamic_execution_graph(
     return _DynamicCompiledGraph(
         steps=tuple(steps),
         node_count=node_count,
-        terminal_measurements=terminal_measurements,
+        terminal_measurements=tuple(terminal_measurements),
     )
 
 
@@ -199,27 +157,6 @@ def _set_classical_bit(value: int, *, bit: int, outcome: int, n_bits: int) -> in
     shift = n_bits - 1 - bit
     bit_mask = 1 << shift
     return (value & ~bit_mask) | (outcome << shift)
-
-
-def _state_merge_signature(
-    state_vector: torch.Tensor,
-    *,
-    sig_vector_a: torch.Tensor,
-    sig_vector_b: torch.Tensor,
-    scale: int,
-) -> tuple[int, ...]:
-    """Compact state fingerprint for merge bucketing."""
-    state = state_vector[0]
-    projections = torch.stack((
-        torch.sum(state * sig_vector_a),
-        torch.sum(state * sig_vector_b),
-        state[0],
-        state[-1],
-    ))
-    values = torch.view_as_real(projections).reshape(-1).to(torch.float32)
-    values_cpu = cast(npt.NDArray[np.float32], values.cpu().numpy())
-    quantized = np.rint(values_cpu * scale).astype(np.int64, copy=False)
-    return tuple(int(v) for v in quantized)
 
 
 def _counts_from_dynamic_branch_paths(
@@ -243,6 +180,39 @@ def _counts_from_dynamic_branch_paths(
     return counts
 
 
+def _counts_from_register_codes(
+    register_codes: torch.Tensor,
+    *,
+    n_bits: int,
+    num_shots: int,
+) -> dict[str, int]:
+    """Convert encoded classical-register integers to output count dict."""
+    if num_shots == 0:
+        return {}
+    if n_bits == 0:
+        return {"": num_shots}
+
+    counts: dict[str, int] = {}
+
+    if n_bits <= 20:
+        histogram = torch.bincount(register_codes, minlength=1 << n_bits)
+        nonzero_codes = torch.nonzero(histogram, as_tuple=False).flatten()
+        if nonzero_codes.numel() == 0:
+            return counts
+
+        values = histogram[nonzero_codes].to(dtype=torch.int64)
+        for code, count in zip(nonzero_codes.cpu().tolist(), values.cpu().tolist(), strict=True):
+            counts[format(int(code), f"0{n_bits}b")] = int(count)
+        return counts
+
+    unique_codes, unique_counts = torch.unique(register_codes, return_counts=True, sorted=True)
+    for code, count in zip(unique_codes.cpu().tolist(), unique_counts.cpu().tolist(), strict=True):
+        count_int = int(count)
+        if count_int:
+            counts[format(int(code), f"0{n_bits}b")] = count_int
+    return counts
+
+
 def _accumulate_count_dict(dst: dict[str, int], src: dict[str, int]) -> None:
     for key, value in src.items():
         dst[key] = dst.get(key, 0) + value
@@ -253,67 +223,80 @@ def _sample_terminal_measurements_from_branches(
     branches: dict[tuple[int, int], int],
     state_arena: dict[int, torch.Tensor],
     terminal_measurements: tuple[Measurement, ...],
-    gate_system: "BatchedQuantumSystem",
     num_shots: int,
     n_qubits: int,
     n_bits: int,
-    device: torch.device,
 ) -> dict[str, int]:
+    """Sample terminal measurements from branch-weighted final states."""
     if not terminal_measurements:
         return _counts_from_dynamic_branch_paths(branches, n_bits=n_bits, num_shots=num_shots)
 
     sampled_counts: dict[str, int] = {}
-    terminal_weight_cache: dict[int, torch.Tensor] = {}
     single_terminal_measurement = terminal_measurements[0] if len(terminal_measurements) == 1 else None
+
+    if single_terminal_measurement is not None:
+        measurement = single_terminal_measurement
+        qubit_shift = n_qubits - 1 - measurement.qubit
+        bit_shift = n_bits - 1 - measurement.bit
+        bit_mask = 1 << bit_shift
+        any_state = next(iter(state_arena.values()))
+        indices = torch.arange(1 << n_qubits, device=any_state.device, dtype=torch.int64)
+        measured_mask = ((indices >> qubit_shift) & 1).to(torch.float32)
+        state_prob_cache: dict[int, float] = {}
+
+        for (state_id, classical_value), shots in branches.items():
+            if shots <= 0:
+                continue
+
+            p1 = state_prob_cache.get(state_id)
+            if p1 is None:
+                probs = torch.abs(state_arena[state_id][0]) ** 2
+                p1 = float((probs @ measured_mask).clamp(0.0, 1.0).item())
+                state_prob_cache[state_id] = p1
+
+            shots_1 = _sample_binomial_count(shots=shots, p1=p1)
+            shots_0 = shots - shots_1
+
+            if shots_0 > 0:
+                classical_0 = classical_value & ~bit_mask
+                key_0 = format(classical_0, f"0{n_bits}b")
+                sampled_counts[key_0] = sampled_counts.get(key_0, 0) + shots_0
+
+            if shots_1 > 0:
+                classical_1 = classical_value | bit_mask
+                key_1 = format(classical_1, f"0{n_bits}b")
+                sampled_counts[key_1] = sampled_counts.get(key_1, 0) + shots_1
+
+        return sampled_counts
+
+    state_prob_cache: dict[int, torch.Tensor] = {}
+
+    measurement_specs = tuple(
+        (n_qubits - 1 - measurement.qubit, n_bits - 1 - measurement.bit)
+        for measurement in terminal_measurements
+    )
+
     for (state_id, classical_value), shots in branches.items():
         if shots <= 0:
             continue
 
-        if single_terminal_measurement is not None:
-            measurement = single_terminal_measurement
-            weight = terminal_weight_cache.get(measurement.qubit)
-            if weight is None:
-                weight = gate_system._measurement_weight_for_qubit(measurement.qubit)
-                terminal_weight_cache[measurement.qubit] = weight
+        probs = state_prob_cache.get(state_id)
+        if probs is None:
+            probs = torch.abs(state_arena[state_id][0]) ** 2
+            probs = probs / probs.sum().clamp_min(1e-12)
+            state_prob_cache[state_id] = probs
 
-            state_probs = torch.abs(state_arena[state_id][0]) ** 2
-            p1 = float((state_probs @ weight).clamp(0.0, 1.0).item())
-            shots_1 = int(np.random.binomial(shots, p1))
-            shots_0 = shots - shots_1
+        sampling_probs = probs
+        if sampling_probs.device.type == "mps":
+            sampling_probs = sampling_probs.to("cpu")
 
-            if shots_0 > 0:
-                classical_0 = _set_classical_bit(
-                    classical_value,
-                    bit=measurement.bit,
-                    outcome=0,
-                    n_bits=n_bits,
-                )
-                key_0 = format(classical_0, f"0{n_bits}b")
-                sampled_counts[key_0] = sampled_counts.get(key_0, 0) + shots_0
-            if shots_1 > 0:
-                classical_1 = _set_classical_bit(
-                    classical_value,
-                    bit=measurement.bit,
-                    outcome=1,
-                    n_bits=n_bits,
-                )
-                key_1 = format(classical_1, f"0{n_bits}b")
-                sampled_counts[key_1] = sampled_counts.get(key_1, 0) + shots_1
-            continue
+        samples = torch.multinomial(sampling_probs, shots, replacement=True).to(dtype=torch.int64)
+        register_codes = torch.full((shots,), classical_value, dtype=torch.int64, device=samples.device)
 
-        state_probs = torch.abs(state_arena[state_id][0]) ** 2
-        state_probs = state_probs / state_probs.sum().clamp_min(1e-12)
-        sampling_device = torch.device("cpu") if device.type == "mps" else state_probs.device
-        if state_probs.device != sampling_device:
-            state_probs = state_probs.to(sampling_device)
-
-        samples = torch.multinomial(state_probs, shots, replacement=True).to(dtype=torch.int64)
-        register_codes = torch.full((shots,), classical_value, dtype=torch.int64, device=sampling_device)
-        for measurement in terminal_measurements:
-            measured_bit = (samples >> (n_qubits - 1 - measurement.qubit)) & 1
-            shift = n_bits - 1 - measurement.bit
-            bit_mask = 1 << shift
-            register_codes = (register_codes & ~bit_mask) | (measured_bit << shift)
+        for qubit_shift, bit_shift in measurement_specs:
+            measured_bit = (samples >> qubit_shift) & 1
+            bit_mask = 1 << bit_shift
+            register_codes = (register_codes & ~bit_mask) | (measured_bit << bit_shift)
 
         _accumulate_count_dict(
             sampled_counts,
@@ -323,30 +306,212 @@ def _sample_terminal_measurements_from_branches(
     return sampled_counts
 
 
+def _state_merge_signature(
+    state_vector: torch.Tensor,
+    *,
+    sig_vector_a: torch.Tensor,
+    sig_vector_b: torch.Tensor,
+    scale: int,
+    signature_weights: torch.Tensor,
+) -> int:
+    """Compact state fingerprint used to bucket equivalent collapsed states."""
+    state = state_vector[0]
+    projections = torch.stack(
+        (
+            torch.sum(state * sig_vector_a),
+            torch.sum(state * sig_vector_b),
+            state[0],
+            state[-1],
+        )
+    )
+    values = torch.view_as_real(projections).reshape(-1).to(torch.float32)
+    quantized = torch.round(values * scale).to(torch.int64)
+    signature = torch.sum(quantized * signature_weights)
+    return int(signature.item())
+
+
+def _sample_binomial_count(*, shots: int, p1: float) -> int:
+    """Sample Binomial(shots, p1) with a scalar CPU draw."""
+    if shots <= 0:
+        return 0
+    if p1 <= 0.0:
+        return 0
+    if p1 >= 1.0:
+        return shots
+
+    sample = torch.binomial(
+        torch.tensor(float(shots), dtype=torch.float32),
+        torch.tensor(float(p1), dtype=torch.float32),
+    )
+    return int(sample.item())
+
+
+def _advance_branches_with_gate_sequence(
+    *,
+    branches: dict[tuple[int, int], int],
+    state_arena: dict[int, torch.Tensor],
+    gate_system: "BatchedQuantumSystem",
+    gates: tuple[Gate, ...],
+    add_state: Callable[[torch.Tensor], int],
+    condition: int | None,
+) -> dict[tuple[int, int], int]:
+    """Advance branch states through a contiguous gate run."""
+    transition_cache: dict[int, int] = {}
+    next_branches: dict[tuple[int, int], int] = {}
+
+    for (state_id, classical_value), shots in branches.items():
+        if shots <= 0:
+            continue
+
+        if condition is not None and classical_value != condition:
+            key = (state_id, classical_value)
+            next_branches[key] = next_branches.get(key, 0) + shots
+            continue
+
+        next_state_id = transition_cache.get(state_id)
+        if next_state_id is None:
+            gate_system.state_vectors = state_arena[state_id]
+            for gate in gates:
+                _ = gate_system.apply_gate(gate)
+            next_state_id = add_state(gate_system.state_vectors)
+            transition_cache[state_id] = next_state_id
+
+        key = (next_state_id, classical_value)
+        next_branches[key] = next_branches.get(key, 0) + shots
+
+    return next_branches
+
+
+def _advance_branches_with_measurement(
+    *,
+    branches: dict[tuple[int, int], int],
+    state_arena: dict[int, torch.Tensor],
+    gate_system: "BatchedQuantumSystem",
+    measurement: Measurement,
+    n_bits: int,
+    measurement_masks: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    add_state: Callable[[torch.Tensor], int],
+    sig_vector_a: torch.Tensor,
+    sig_vector_b: torch.Tensor,
+    signature_scale: int,
+    signature_weights: torch.Tensor,
+) -> dict[tuple[int, int], int]:
+    """Advance branches through one non-terminal measurement step."""
+    mask_entry = measurement_masks.get(measurement.qubit)
+    if mask_entry is None:
+        mask_1 = gate_system._measurement_mask_for_qubit(measurement.qubit)
+        weight_1 = gate_system._measurement_weight_for_qubit(measurement.qubit)
+        keep_0 = (~mask_1).to(torch.complex64).unsqueeze(0)
+        keep_1 = mask_1.to(torch.complex64).unsqueeze(0)
+        measurement_masks[measurement.qubit] = (weight_1, keep_0, keep_1)
+    else:
+        weight_1, keep_0, keep_1 = mask_entry
+
+    state_prob_cache: dict[int, float] = {}
+    outcome_state_cache: dict[tuple[int, int], int] = {}
+    merged_state_by_signature: dict[int, int] = {}
+    next_branches: dict[tuple[int, int], int] = {}
+
+    for (state_id, classical_value), shots in branches.items():
+        if shots <= 0:
+            continue
+
+        p1 = state_prob_cache.get(state_id)
+        if p1 is None:
+            probs = torch.abs(state_arena[state_id][0]) ** 2
+            p1_tensor = (probs @ weight_1).clamp(0.0, 1.0)
+            p1 = float(p1_tensor.item())
+            state_prob_cache[state_id] = p1
+
+        shots_1 = _sample_binomial_count(shots=shots, p1=p1)
+        shots_0 = shots - shots_1
+
+        if shots_0 > 0:
+            outcome_key = (state_id, 0)
+            state_0_id = outcome_state_cache.get(outcome_key)
+            if state_0_id is None:
+                state_0 = state_arena[state_id] * keep_0
+                norm_0 = max(1.0 - p1, 1e-12) ** 0.5
+                state_0 = state_0 / norm_0
+                signature_0 = _state_merge_signature(
+                    state_0,
+                    sig_vector_a=sig_vector_a,
+                    sig_vector_b=sig_vector_b,
+                    scale=signature_scale,
+                    signature_weights=signature_weights,
+                )
+                state_0_id = merged_state_by_signature.get(signature_0)
+                if state_0_id is None:
+                    state_0_id = add_state(state_0)
+                    merged_state_by_signature[signature_0] = state_0_id
+                outcome_state_cache[outcome_key] = state_0_id
+
+            classical_0 = _set_classical_bit(
+                classical_value,
+                bit=measurement.bit,
+                outcome=0,
+                n_bits=n_bits,
+            )
+            key = (state_0_id, classical_0)
+            next_branches[key] = next_branches.get(key, 0) + shots_0
+
+        if shots_1 > 0:
+            outcome_key = (state_id, 1)
+            state_1_id = outcome_state_cache.get(outcome_key)
+            if state_1_id is None:
+                state_1 = state_arena[state_id] * keep_1
+                norm_1 = max(p1, 1e-12) ** 0.5
+                state_1 = state_1 / norm_1
+                signature_1 = _state_merge_signature(
+                    state_1,
+                    sig_vector_a=sig_vector_a,
+                    sig_vector_b=sig_vector_b,
+                    scale=signature_scale,
+                    signature_weights=signature_weights,
+                )
+                state_1_id = merged_state_by_signature.get(signature_1)
+                if state_1_id is None:
+                    state_1_id = add_state(state_1)
+                    merged_state_by_signature[signature_1] = state_1_id
+                outcome_state_cache[outcome_key] = state_1_id
+
+            classical_1 = _set_classical_bit(
+                classical_value,
+                bit=measurement.bit,
+                outcome=1,
+                n_bits=n_bits,
+            )
+            key = (state_1_id, classical_1)
+            next_branches[key] = next_branches.get(key, 0) + shots_1
+
+    return next_branches
+
+
+def _compact_state_arena(
+    state_arena: dict[int, torch.Tensor],
+    branches: dict[tuple[int, int], int],
+) -> None:
+    """Drop unreferenced states to keep memory bounded."""
+    live_state_ids = {state_id for (state_id, _), shots in branches.items() if shots > 0}
+    stale_state_ids = [state_id for state_id in state_arena if state_id not in live_state_ids]
+    for state_id in stale_state_ids:
+        del state_arena[state_id]
+
+
 @torch.inference_mode()
-def _run_dynamic_branch_simulation(
+def _run_compiled_simulation(
     *,
     circuit: Circuit,
     num_shots: int,
     n_qubits: int,
     n_bits: int,
     device: torch.device,
-) -> dict[str, int] | None:
-    """Compiled graph executor with branch-state paths.
-
-    Unified entrypoint for static and dynamic circuits:
-    - node_count == 0: execute edges directly, then sink-sample.
-    - node_count > 0: execute node traversal with branching, then sink-sample.
-    """
-    if os.environ.get("QUANTUM_DISABLE_DYNAMIC_BRANCH_ENGINE") == "1":
-        return None
-
-    compiled = _compile_dynamic_execution_graph(circuit)
+) -> dict[str, int]:
+    """Unified compiled executor for static and dynamic circuits."""
     if num_shots == 0:
         return {}
-    steps = compiled.steps
-    node_count = compiled.node_count
-    terminal_measurements = compiled.terminal_measurements
+
+    compiled = _compile_execution_graph(circuit)
 
     gate_system = BatchedQuantumSystem(
         n_qubits=n_qubits,
@@ -354,50 +519,6 @@ def _run_dynamic_branch_simulation(
         batch_size=1,
         device=device,
     )
-
-    if node_count == 0:
-        # Static edge-only graph: apply once and sink-sample.
-        for step in steps:
-            if isinstance(step, _DynamicSegmentStep):
-                for gate in step.gates:
-                    _ = gate_system.apply_gate(gate)
-                continue
-
-            if isinstance(step, _DynamicConditionalStep):
-                if step.condition != 0:
-                    continue
-                for gate in step.gates:
-                    _ = gate_system.apply_gate(gate)
-                continue
-
-            raise RuntimeError("Execution graph invariant violated: node_count=0 includes measurement node")
-
-        return _sample_terminal_measurements_from_branches(
-            branches={(0, 0): num_shots},
-            state_arena={0: gate_system.state_vectors},
-            terminal_measurements=terminal_measurements,
-            gate_system=gate_system,
-            num_shots=num_shots,
-            n_qubits=n_qubits,
-            n_bits=n_bits,
-            device=device,
-        )
-
-    try:
-        branch_cap = int(os.environ.get("QUANTUM_DYNAMIC_BRANCH_CAP", "4096"))
-    except ValueError:
-        branch_cap = 4096
-    if branch_cap <= 0:
-        branch_cap = 4096
-
-    dim = 1 << n_qubits
-
-    signature_scale = 10 ** 6
-    indices = torch.arange(dim, device=device, dtype=torch.float32)
-    phase_a = 0.731 * indices + 0.119 * (indices * indices)
-    phase_b = 1.213 * indices + 0.071 * (indices * indices)
-    sig_vector_a = (torch.cos(phase_a) + 1j * torch.sin(phase_a)).to(torch.complex64)
-    sig_vector_b = (torch.cos(phase_b) + 1j * torch.sin(phase_b)).to(torch.complex64)
 
     state_arena: dict[int, torch.Tensor] = {0: gate_system.state_vectors}
     next_state_id = 1
@@ -410,256 +531,102 @@ def _run_dynamic_branch_simulation(
         return state_id
 
     branches: dict[tuple[int, int], int] = {(0, 0): num_shots}
+
+    signature_scale = 1_000_000
+    signature_weights: torch.Tensor | None = None
+    sig_vector_a: torch.Tensor | None = None
+    sig_vector_b: torch.Tensor | None = None
     measurement_masks: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
-    for step in steps:
+    if compiled.node_count > 0:
+        dim = 1 << n_qubits
+        indices = torch.arange(dim, device=device, dtype=torch.float32)
+        phase_a = 0.731 * indices + 0.119 * (indices * indices)
+        phase_b = 1.213 * indices + 0.071 * (indices * indices)
+        sig_vector_a = (torch.cos(phase_a) + 1j * torch.sin(phase_a)).to(torch.complex64)
+        sig_vector_b = (torch.cos(phase_b) + 1j * torch.sin(phase_b)).to(torch.complex64)
+        signature_weights = torch.tensor(
+            [
+                1_000_003,
+                1_000_033,
+                1_000_037,
+                1_000_039,
+                1_000_081,
+                1_000_099,
+                1_000_117,
+                1_000_121,
+            ],
+            dtype=torch.int64,
+            device=device,
+        )
+
+    for step in compiled.steps:
         if isinstance(step, _DynamicSegmentStep):
-            transition_cache: dict[int, int] = {}
-            next_branches: dict[tuple[int, int], int] = {}
-            for (state_id, classical_value), shots in branches.items():
-                if shots <= 0:
-                    continue
-                next_state_id_for_branch = transition_cache.get(state_id)
-                if next_state_id_for_branch is None:
-                    gate_system.state_vectors = state_arena[state_id]
-                    for gate in step.gates:
-                        _ = gate_system.apply_gate(gate)
-                    next_state_id_for_branch = _add_state(gate_system.state_vectors)
-                    transition_cache[state_id] = next_state_id_for_branch
-                key = (next_state_id_for_branch, classical_value)
-                next_branches[key] = next_branches.get(key, 0) + shots
-            branches = next_branches
+            branches = _advance_branches_with_gate_sequence(
+                branches=branches,
+                state_arena=state_arena,
+                gate_system=gate_system,
+                gates=step.gates,
+                add_state=_add_state,
+                condition=None,
+            )
 
         elif isinstance(step, _DynamicConditionalStep):
-            transition_cache: dict[int, int] = {}
-            next_branches: dict[tuple[int, int], int] = {}
-            for (state_id, classical_value), shots in branches.items():
-                if shots <= 0:
-                    continue
-                if classical_value != step.condition:
-                    key = (state_id, classical_value)
-                    next_branches[key] = next_branches.get(key, 0) + shots
-                    continue
-
-                next_state_id_for_branch = transition_cache.get(state_id)
-                if next_state_id_for_branch is None:
-                    gate_system.state_vectors = state_arena[state_id]
-                    for gate in step.gates:
-                        _ = gate_system.apply_gate(gate)
-                    next_state_id_for_branch = _add_state(gate_system.state_vectors)
-                    transition_cache[state_id] = next_state_id_for_branch
-                key = (next_state_id_for_branch, classical_value)
-                next_branches[key] = next_branches.get(key, 0) + shots
-            branches = next_branches
+            branches = _advance_branches_with_gate_sequence(
+                branches=branches,
+                state_arena=state_arena,
+                gate_system=gate_system,
+                gates=step.gates,
+                add_state=_add_state,
+                condition=step.condition,
+            )
 
         else:
-            measurement = step.measurement
-            mask_entry = measurement_masks.get(measurement.qubit)
-            if mask_entry is None:
-                mask_1 = gate_system._measurement_mask_for_qubit(measurement.qubit)
-                weight_1 = gate_system._measurement_weight_for_qubit(measurement.qubit)
-                keep_0 = (~mask_1).to(torch.complex64).unsqueeze(0)
-                keep_1 = mask_1.to(torch.complex64).unsqueeze(0)
-                measurement_masks[measurement.qubit] = (weight_1, keep_0, keep_1)
-            else:
-                weight_1, keep_0, keep_1 = mask_entry
+            if sig_vector_a is None or sig_vector_b is None or signature_weights is None:
+                raise RuntimeError("Execution graph invariant violated: missing signature tensors for measurement step")
 
-            state_prob_cache: dict[int, float] = {}
-            outcome_state_cache: dict[tuple[int, int], int] = {}
-            merged_state_by_signature: dict[tuple[int, ...], int] = {}
-            next_branches = {}
+            branches = _advance_branches_with_measurement(
+                branches=branches,
+                state_arena=state_arena,
+                gate_system=gate_system,
+                measurement=step.measurement,
+                n_bits=n_bits,
+                measurement_masks=measurement_masks,
+                add_state=_add_state,
+                sig_vector_a=sig_vector_a,
+                sig_vector_b=sig_vector_b,
+                signature_scale=signature_scale,
+                signature_weights=signature_weights,
+            )
 
-            for (state_id, classical_value), shots in branches.items():
-                if shots <= 0:
-                    continue
-
-                p1 = state_prob_cache.get(state_id)
-                if p1 is None:
-                    probs = torch.abs(state_arena[state_id][0]) ** 2
-                    p1_tensor = (probs @ weight_1).clamp(0.0, 1.0)
-                    p1 = float(p1_tensor.item())
-                    state_prob_cache[state_id] = p1
-
-                shots_1 = int(np.random.binomial(shots, p1))
-                shots_0 = shots - shots_1
-
-                if shots_0 > 0:
-                    outcome_key = (state_id, 0)
-                    state_0_id = outcome_state_cache.get(outcome_key)
-                    if state_0_id is None:
-                        state_0 = state_arena[state_id] * keep_0
-                        norm_0 = max(1.0 - p1, 1e-12) ** 0.5
-                        state_0 = state_0 / norm_0
-                        signature_0 = _state_merge_signature(
-                            state_0,
-                            sig_vector_a=sig_vector_a,
-                            sig_vector_b=sig_vector_b,
-                            scale=signature_scale,
-                        )
-                        state_0_id = merged_state_by_signature.get(signature_0)
-                        if state_0_id is None:
-                            state_0_id = _add_state(state_0)
-                            merged_state_by_signature[signature_0] = state_0_id
-                        outcome_state_cache[outcome_key] = state_0_id
-                    classical_0 = _set_classical_bit(
-                        classical_value,
-                        bit=measurement.bit,
-                        outcome=0,
-                        n_bits=n_bits,
-                    )
-                    key = (state_0_id, classical_0)
-                    next_branches[key] = next_branches.get(key, 0) + shots_0
-
-                if shots_1 > 0:
-                    outcome_key = (state_id, 1)
-                    state_1_id = outcome_state_cache.get(outcome_key)
-                    if state_1_id is None:
-                        state_1 = state_arena[state_id] * keep_1
-                        norm_1 = max(p1, 1e-12) ** 0.5
-                        state_1 = state_1 / norm_1
-                        signature_1 = _state_merge_signature(
-                            state_1,
-                            sig_vector_a=sig_vector_a,
-                            sig_vector_b=sig_vector_b,
-                            scale=signature_scale,
-                        )
-                        state_1_id = merged_state_by_signature.get(signature_1)
-                        if state_1_id is None:
-                            state_1_id = _add_state(state_1)
-                            merged_state_by_signature[signature_1] = state_1_id
-                        outcome_state_cache[outcome_key] = state_1_id
-                    classical_1 = _set_classical_bit(
-                        classical_value,
-                        bit=measurement.bit,
-                        outcome=1,
-                        n_bits=n_bits,
-                    )
-                    key = (state_1_id, classical_1)
-                    next_branches[key] = next_branches.get(key, 0) + shots_1
-
-            branches = next_branches
-            if len(branches) > branch_cap:
-                # Conservative fallback for branch explosion.
-                return None
-
-        live_state_ids = {state_id for (state_id, _), shots in branches.items() if shots > 0}
-        state_arena = {state_id: state_arena[state_id] for state_id in live_state_ids}
+        _compact_state_arena(state_arena, branches)
 
     return _sample_terminal_measurements_from_branches(
         branches=branches,
         state_arena=state_arena,
-        terminal_measurements=terminal_measurements,
-        gate_system=gate_system,
+        terminal_measurements=compiled.terminal_measurements,
         num_shots=num_shots,
         n_qubits=n_qubits,
         n_bits=n_bits,
-        device=device,
     )
-
-
-def _counts_from_register_codes(
-    register_codes: torch.Tensor,
-    *,
-    n_bits: int,
-    num_shots: int,
-) -> dict[str, int]:
-    """Convert encoded classical-register integers to output count dict."""
-    if num_shots == 0:
-        return {}
-
-    if n_bits == 0:
-        return {"": num_shots}
-
-    counts: dict[str, int] = {}
-
-    # Dense histogram is fastest for benchmark-scale bit widths.
-    if n_bits <= 20:
-        histogram = torch.bincount(register_codes, minlength=1 << n_bits)
-        histogram_cpu = cast(npt.NDArray[np.int64], histogram.cpu().numpy())
-        for code, count in enumerate(histogram_cpu):
-            count_int = int(count)
-            if count_int:
-                counts[format(code, f"0{n_bits}b")] = count_int
-        return counts
-
-    # Fallback avoids allocating a dense 2^n histogram for large classical registers.
-    unique_codes, unique_counts = torch.unique(register_codes, return_counts=True, sorted=True)
-    unique_codes_cpu = cast(npt.NDArray[np.int64], unique_codes.cpu().numpy())
-    unique_counts_cpu = cast(npt.NDArray[np.int64], unique_counts.cpu().numpy())
-    for code, count in zip(unique_codes_cpu, unique_counts_cpu, strict=True):
-        count_int = int(count)
-        if count_int:
-            counts[format(int(code), f"0{n_bits}b")] = count_int
-    return counts
-
-
-@torch.inference_mode()
-def _run_terminal_measurement_sampling(
-    *,
-    circuit: Circuit,
-    num_shots: int,
-    n_qubits: int,
-    n_bits: int,
-    device: torch.device,
-) -> dict[str, int] | None:
-    """Fast path for static circuits with terminal measurements only."""
-    plan = _terminal_measurement_plan(circuit)
-    if plan is None:
-        return None
-
-    if num_shots == 0:
-        return {}
-
-    gates, measurements = plan
-    system = BatchedQuantumSystem(
-        n_qubits=n_qubits,
-        n_bits=n_bits,
-        batch_size=1,
-        device=device,
-    )
-
-    for gate in gates:
-        _ = system.apply_gate(gate)
-
-    probabilities = torch.abs(system.state_vectors[0]) ** 2
-    probabilities = probabilities / probabilities.sum().clamp_min(1e-12)
-    sampling_device = torch.device("cpu") if device.type == "mps" else probabilities.device
-    if probabilities.device != sampling_device:
-        probabilities = probabilities.to(sampling_device)
-
-    samples = torch.multinomial(probabilities, num_shots, replacement=True).to(dtype=torch.int64)
-
-    register_codes = torch.zeros(num_shots, dtype=torch.int64, device=sampling_device)
-    for measurement in measurements:
-        measured_bit = (samples >> (n_qubits - 1 - measurement.qubit)) & 1
-        shift = n_bits - 1 - measurement.bit
-        bit_mask = 1 << shift
-        register_codes = (register_codes & ~bit_mask) | (measured_bit << shift)
-
-    return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
 
 
 def measure_all(qubits: QuantumRegister | list[int] | int) -> Circuit:
-    """Measure qubits into sequential classical bits starting at 0.
-
-    measure_all(qr)           # all qubits in register -> bits 0..n-1
-    measure_all(qr[0:4])      # sub-register
-    measure_all(4)             # qubits 0-3 (shorthand)
-    """
+    """Measure qubits into sequential classical bits starting at 0."""
     if isinstance(qubits, int):
         indices = list(range(qubits))
     elif isinstance(qubits, QuantumRegister):
         indices = list(qubits)
     else:
         indices = list(qubits)
-    return Circuit([Measurement(q, i) for i, q in enumerate(indices)])
+    return Circuit([Measurement(qubit, bit) for bit, qubit in enumerate(indices)])
 
 
 class BatchedQuantumSystem:
-    """A batched quantum system that processes multiple state vectors in parallel."""
+    """Batched state-vector system optimized for MPS execution."""
 
     state_vectors: Annotated[torch.Tensor, "(batch_size, 2^n_qubits) complex64"]
-    bit_registers: Annotated[torch.Tensor, "(batch_size, n_bits) int"]
+    bit_registers: Annotated[torch.Tensor, "(batch_size, n_bits) int32"]
     n_qubits: int
     n_bits: int
     batch_size: int
@@ -673,12 +640,14 @@ class BatchedQuantumSystem:
     _diagonal_subindices: dict[tuple[int, ...], torch.Tensor]
     _permutation_source_indices: dict[tuple[tuple[int, ...], int], torch.Tensor]
     _permutation_phase_factors: dict[tuple[tuple[int, ...], int], torch.Tensor]
+    _axis_permutations: dict[tuple[int, ...], tuple[tuple[int, ...], tuple[int, ...]]]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
         self.n_bits = n_bits
         self.batch_size = batch_size
         self.device = device
+
         self._measurement_masks = {}
         self._measurement_weights = {}
         self._gate_tensors = {}
@@ -688,76 +657,49 @@ class BatchedQuantumSystem:
         self._diagonal_subindices = {}
         self._permutation_source_indices = {}
         self._permutation_phase_factors = {}
+        self._axis_permutations = {}
 
-        # Initialize all state vectors to |000...0⟩
-        # Shape: (batch_size, 2^n_qubits) - each row is a state vector
         dim = 1 << n_qubits
         self.state_vectors = torch.zeros((batch_size, dim), dtype=torch.complex64, device=device)
         self.state_vectors[:, 0] = 1.0
-
-        # Initialize classical bit registers
         self.bit_registers = torch.zeros((batch_size, n_bits), dtype=torch.int32, device=device)
 
     @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
-        """Apply a gate to all state vectors via tensor contraction.
-
-        Reshapes the state from (batch, 2^n) to (batch, 2, 2, ..., 2),
-        permutes target qubit axes to the end, reshapes to 2D, and does
-        a single matmul.  No Kronecker products, no swap matrices.
-        O(2^n) per gate instead of O(4^n).
-        """
+        """Apply a gate to all state vectors."""
         if gate.diagonal is not None:
             return self._apply_diagonal_gate(gate)
         if gate.permutation is not None:
             return self._apply_permutation_gate(gate)
 
-        targets = gate.targets
+        targets = tuple(gate.targets)
         tensor = self._device_gate_tensor(gate.tensor)
         k = len(targets)
         n = self.n_qubits
 
-        # Reshape state: (batch, 2^n) -> (batch, 2, 2, ..., 2)
         state = self.state_vectors.view((self.batch_size,) + (2,) * n)
-
-        # Move target qubit axes to the end: (batch, non_targets..., targets...)
-        non_targets = [i for i in range(n) if i not in targets]
-        perm = [0] + [i + 1 for i in non_targets] + [t + 1 for t in targets]
+        perm, inv_perm = self._axis_permutation_for_targets(targets)
         state = state.permute(perm)
-
-        # Flatten to 2D for matmul: (batch * 2^{n-k}, 2^k)
         state = state.reshape(-1, 1 << k)
-
-        # Apply gate: (batch * 2^{n-k}, 2^k) @ (2^k, 2^k)^T
         state = state @ tensor.T
-
-        # Reshape back to (batch, 2, ..., 2) in permuted order, then restore
         state = state.reshape((self.batch_size,) + (2,) * n)
-        inv_perm = [0] * (n + 1)
-        for new_pos, old_pos in enumerate(perm):
-            inv_perm[old_pos] = new_pos
         state = state.permute(inv_perm)
 
         self.state_vectors = state.reshape(self.batch_size, -1)
         return self
 
     def _apply_diagonal_gate(self, gate: Gate) -> "BatchedQuantumSystem":
-        """Apply a diagonal gate via elementwise multiplication."""
         diagonal = gate.diagonal
         assert diagonal is not None
 
         diagonal_device = self._device_gate_diagonal(diagonal)
         targets = tuple(gate.targets)
         subindex = self._diagonal_subindex_for_targets(targets)
-
-        # Each basis amplitude is scaled by the gate diagonal entry selected
-        # from the target-qubit bit pattern for that basis state.
-        factors = diagonal_device[subindex]  # (2^n,)
+        factors = diagonal_device[subindex]
         self.state_vectors = self.state_vectors * factors.unsqueeze(0)
         return self
 
     def _apply_permutation_gate(self, gate: Gate) -> "BatchedQuantumSystem":
-        """Apply a monomial gate (permutation with optional row factors)."""
         permutation = gate.permutation
         assert permutation is not None
 
@@ -777,36 +719,30 @@ class BatchedQuantumSystem:
 
     @torch.inference_mode()
     def apply_measurement(self, measurement: Measurement) -> "BatchedQuantumSystem":
-        """Apply measurement to all state vectors in the batch.
-
-        state_vectors shape: (batch_size, 2^n)
-        """
+        """Apply projective measurement to all batch elements."""
         qubit = measurement.qubit
         bit = measurement.bit
 
+        if qubit < 0 or qubit >= self.n_qubits:
+            raise ValueError(f"Qubit index {qubit} out of range [0, {self.n_qubits})")
+        if bit < 0 or bit >= self.n_bits:
+            raise ValueError(f"Classical bit index {bit} out of range [0, {self.n_bits})")
+
         mask_1 = self._measurement_mask_for_qubit(qubit)
+        probs = torch.abs(self.state_vectors) ** 2
+        p1 = (probs @ self._measurement_weight_for_qubit(qubit)).clamp(0.0, 1.0)
 
-        probs = torch.abs(self.state_vectors) ** 2  # (batch_size, 2^n)
-        p1 = (probs @ self._measurement_weight_for_qubit(qubit)).clamp(0.0, 1.0)  # (batch_size,)
-
-        # Sample outcomes for all batches at once
-        outcomes = (torch.rand(self.batch_size, device=self.device) < p1).to(torch.int32)  # (batch_size,)
-
-        # Store outcomes in bit registers
+        outcomes = (torch.rand(self.batch_size, device=self.device) < p1).to(torch.int32)
         self.bit_registers[:, bit] = outcomes
 
-        # Vectorized projection:
-        # keep amplitudes where basis qubit value matches each sample's outcome.
-        keep = mask_1.unsqueeze(0) == outcomes.unsqueeze(1).bool()  # (batch_size, 2^n)
+        keep = mask_1.unsqueeze(0) == outcomes.unsqueeze(1).bool()
         self.state_vectors = self.state_vectors * keep
 
         norms = torch.sqrt((torch.abs(self.state_vectors) ** 2).sum(dim=1, keepdim=True))
         self.state_vectors = self.state_vectors / norms.clamp_min(1e-12)
-
         return self
 
     def _measurement_mask_for_qubit(self, qubit: int) -> torch.Tensor:
-        """Basis-state mask where `qubit` is in state |1>."""
         mask = self._measurement_masks.get(qubit)
         if mask is not None:
             return mask
@@ -818,7 +754,6 @@ class BatchedQuantumSystem:
         return mask
 
     def _measurement_weight_for_qubit(self, qubit: int) -> torch.Tensor:
-        """Float mask for fast p(|1>) computation via matmul."""
         weight = self._measurement_weights.get(qubit)
         if weight is not None:
             return weight
@@ -828,68 +763,65 @@ class BatchedQuantumSystem:
         return weight
 
     def _device_gate_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Cache gate tensors on the active device to avoid per-op transfers."""
         key = id(tensor)
         cached = self._gate_tensors.get(key)
         if cached is not None:
             return cached
 
-        if tensor.device == self.device:
-            self._gate_tensors[key] = tensor
-            return tensor
-
-        moved = tensor.to(self.device)
+        moved = tensor if tensor.device == self.device else tensor.to(self.device)
         self._gate_tensors[key] = moved
         return moved
 
     def _device_gate_diagonal(self, diagonal: torch.Tensor) -> torch.Tensor:
-        """Cache gate diagonals on device."""
         key = id(diagonal)
         cached = self._gate_diagonals.get(key)
         if cached is not None:
             return cached
 
-        if diagonal.device == self.device:
-            self._gate_diagonals[key] = diagonal
-            return diagonal
-
-        moved = diagonal.to(self.device)
+        moved = diagonal if diagonal.device == self.device else diagonal.to(self.device)
         self._gate_diagonals[key] = moved
         return moved
 
     def _device_gate_permutation(self, permutation: torch.Tensor) -> torch.Tensor:
-        """Cache gate permutations on device."""
         key = id(permutation)
         cached = self._gate_permutations.get(key)
         if cached is not None:
             return cached
 
         permutation_i64 = permutation.to(dtype=torch.int64)
-        if permutation_i64.device == self.device:
-            self._gate_permutations[key] = permutation_i64
-            return permutation_i64
-
-        moved = permutation_i64.to(self.device)
+        moved = permutation_i64 if permutation_i64.device == self.device else permutation_i64.to(self.device)
         self._gate_permutations[key] = moved
         return moved
 
     def _device_gate_permutation_factors(self, factors: torch.Tensor) -> torch.Tensor:
-        """Cache monomial gate row factors on device."""
         key = id(factors)
         cached = self._gate_permutation_factors.get(key)
         if cached is not None:
             return cached
 
-        if factors.device == self.device:
-            self._gate_permutation_factors[key] = factors
-            return factors
-
-        moved = factors.to(self.device)
+        moved = factors if factors.device == self.device else factors.to(self.device)
         self._gate_permutation_factors[key] = moved
         return moved
 
+    def _axis_permutation_for_targets(self, targets: tuple[int, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        cached = self._axis_permutations.get(targets)
+        if cached is not None:
+            return cached
+
+        target_set = set(targets)
+        non_targets = tuple(i for i in range(self.n_qubits) if i not in target_set)
+        perm = (0, *(i + 1 for i in non_targets), *(target + 1 for target in targets))
+
+        inv_perm = [0] * (self.n_qubits + 1)
+        for new_pos, old_pos in enumerate(perm):
+            inv_perm[old_pos] = new_pos
+        inv_perm_tuple = tuple(inv_perm)
+
+        cached_value = (perm, inv_perm_tuple)
+        self._axis_permutations[targets] = cached_value
+        return cached_value
+
     def _diagonal_subindex_for_targets(self, targets: tuple[int, ...]) -> torch.Tensor:
-        """Map basis indices to diagonal-entry indices for target qubits."""
         cached = self._diagonal_subindices.get(targets)
         if cached is not None:
             return cached
@@ -898,7 +830,6 @@ class BatchedQuantumSystem:
         subindex = torch.zeros_like(indices)
         k = len(targets)
 
-        # The first target is the most significant bit in the gate basis index.
         for out_pos, target in enumerate(targets):
             bitpos = self.n_qubits - 1 - target
             bit = (indices >> bitpos) & 1
@@ -912,7 +843,6 @@ class BatchedQuantumSystem:
         targets: tuple[int, ...],
         permutation: torch.Tensor,
     ) -> torch.Tensor:
-        """Map output basis indices to input basis indices for a target-local permutation."""
         key = (targets, id(permutation))
         cached = self._permutation_source_indices.get(key)
         if cached is not None:
@@ -942,7 +872,6 @@ class BatchedQuantumSystem:
         targets: tuple[int, ...],
         factors: torch.Tensor,
     ) -> torch.Tensor:
-        """Map local monomial row factors to all global basis indices."""
         key = (targets, id(factors))
         cached = self._permutation_phase_factors.get(key)
         if cached is not None:
@@ -952,87 +881,6 @@ class BatchedQuantumSystem:
         phase_factors = factors[subindex]
         self._permutation_phase_factors[key] = phase_factors
         return phase_factors
-
-    @torch.inference_mode()
-    def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "BatchedQuantumSystem":
-        """Apply a single operation to all state vectors."""
-        if isinstance(operation, Gate):
-            return self.apply_gate(operation)
-
-        if isinstance(operation, Measurement):
-            return self.apply_measurement(operation)
-
-        # For conditional gates, check condition for each batch element
-        bit_values = self._get_bits_values()  # (batch_size,)
-        mask = (bit_values == operation.condition)
-
-        # Only apply gate to state vectors that meet the condition
-        if mask.any():
-            # This is tricky - we need selective application
-            # For simplicity, apply to all and restore non-matching ones
-            old_states = self.state_vectors[~mask].clone()
-            _ = self.apply_one(operation.gate)
-            self.state_vectors[~mask] = old_states
-
-        return self
-
-    @torch.inference_mode()
-    def apply_circuit(self, circuit: Circuit) -> "BatchedQuantumSystem":
-        """Apply a circuit to all state vectors."""
-        for operation in circuit.operations:
-            if isinstance(operation, Circuit):
-                _ = self.apply_circuit(operation)
-            else:
-                _ = self.apply_one(operation)
-        return self
-
-    def _get_bits_values(self) -> torch.Tensor:
-        """Convert bit registers to integer values. Returns (batch_size,) tensor."""
-        result = torch.zeros(self.batch_size, dtype=torch.int32, device=self.device)
-        for i in range(self.n_bits):
-            result = (result << 1) | self.bit_registers[:, i]
-        return result
-
-    def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, offset: int = 0) -> torch.Tensor:
-        """Same as QuantumSystem._gate_to_qubit"""
-        I = torch.eye(2, dtype=gate.dtype, device=gate.device)
-        factors = [*[I for _ in range(offset)], gate, *[I for _ in range(self.n_qubits - n_targets - offset)]]
-        full = factors[0]
-        for f in factors[1:]:
-            full = torch.kron(full, f)
-        return full
-
-    def _get_swap_matrix(self, target_1: int, target_2: int) -> torch.Tensor:
-        """Same as QuantumSystem._get_swap_matrix"""
-        dim = 1 << self.n_qubits
-        S = torch.zeros((dim, dim), dtype=torch.complex64, device=self.device)
-
-        b1 = self.n_qubits - 1 - target_1
-        b2 = self.n_qubits - 1 - target_2
-
-        i, j = sorted((b1, b2))
-        mask = (1 << i) | (1 << j)
-
-        for x in range(dim):
-            bi = (x >> i) & 1
-            bj = (x >> j) & 1
-            y = x if bi == bj else x ^ mask
-            S[y, x] = 1
-
-        return S
-
-    def get_results(self) -> dict[str, int]:
-        """Collect measurement results from all batches."""
-        counts: dict[str, int] = {}
-
-        # Convert bit registers to strings
-        bit_registers_cpu = self.bit_registers.cpu().numpy()
-        for i in range(self.batch_size):
-            row = cast(npt.NDArray[np.int32], bit_registers_cpu[i])
-            key = "".join(map(str, row))
-            counts[key] = counts.get(key, 0) + 1
-
-        return counts
 
 
 @torch.inference_mode()
@@ -1044,20 +892,7 @@ def run_simulation(
     n_bits: int | None = None,
     device: torch.device | None = None,
 ) -> dict[str, int]:
-    """Run a quantum circuit simulation multiple times and collect measurement results.
-
-    This uses a batched approach to parallelize operations across all shots on the GPU.
-
-    Args:
-        circuit: The circuit to apply
-        num_shots: Number of times to run the simulation
-        n_qubits: Number of qubits (inferred from circuit if not provided)
-        n_bits: Number of classical bits (inferred from circuit if not provided)
-        device: Torch device to use (auto-detected if not provided)
-
-    Returns:
-        Dictionary mapping bit strings to their counts
-    """
+    """Run a quantum circuit simulation and return measurement counts."""
     if n_qubits is None or n_bits is None:
         inferred_qubits, inferred_bits = infer_resources(circuit)
         if n_qubits is None:
@@ -1067,78 +902,84 @@ def run_simulation(
 
     if device is None:
         device = torch.device(
-            "cuda" if torch.cuda.is_available() else
-            "mps"  if torch.backends.mps.is_available() else
-            "cpu"
+            "mps"
+            if torch.backends.mps.is_available()
+            else "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
         )
 
-    dynamic_branch_result = _run_dynamic_branch_simulation(
+    return _run_compiled_simulation(
         circuit=circuit,
         num_shots=num_shots,
         n_qubits=n_qubits,
         n_bits=n_bits,
         device=device,
     )
-    if dynamic_branch_result is not None:
-        return dynamic_branch_result
-
-    sampled = _run_terminal_measurement_sampling(
-        circuit=circuit,
-        num_shots=num_shots,
-        n_qubits=n_qubits,
-        n_bits=n_bits,
-        device=device,
-    )
-    if sampled is not None:
-        return sampled
-
-    batched_system = BatchedQuantumSystem(
-        n_qubits=n_qubits,
-        n_bits=n_bits,
-        batch_size=num_shots,
-        device=device,
-    )
-
-    _ = batched_system.apply_circuit(circuit)
-
-    return batched_system.get_results()
 
 
 class QuantumSystem:
-    state_vector: Annotated[torch.Tensor, "(n, 1) complex64 column vector"]
+    """Single-state wrapper over the batched MPS execution kernels."""
+
+    state_vector: Annotated[torch.Tensor, "(2^n_qubits, 1) complex64"]
     bit_register: Annotated[list[int], "(n_bits) bit string"]
     n_qubits: int
     n_bits: int
     dimensions: int
     device: torch.device
-    ops_done: int
 
-    def __init__(self, n_qubits: int, n_bits: int = 0, state_vector: torch.Tensor | None = None):
+    def __init__(
+        self,
+        n_qubits: int,
+        n_bits: int = 0,
+        state_vector: torch.Tensor | None = None,
+        *,
+        device: torch.device | None = None,
+    ):
         if n_qubits <= 0:
             raise ValueError(f"Number of qubits must be positive, got {n_qubits}")
         if n_bits < 0:
             raise ValueError(f"Number of classical bits must be non-negative, got {n_bits}")
 
-        if state_vector is None:
-            # Initialize state vector to |000...0⟩
-            state_vector = torch.zeros((2 ** n_qubits, 1), dtype=torch.complex64)
-            state_vector[0] = 1.0  # |0⟩ state has amplitude 1 in the first position
-        else:
-            expected_dim = 1 << n_qubits
-            if state_vector.shape != (expected_dim, 1):
-                raise ValueError(f"State vector must have shape ({expected_dim}, 1) for {n_qubits} qubits, got {state_vector.shape}")
-
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else
-            "mps"  if torch.backends.mps.is_available() else
-            "cpu"
-        )
-        self.state_vector = state_vector.to(self.device)
-        self.bit_register = [0] * n_bits
         self.n_qubits = n_qubits
         self.n_bits = n_bits
-        self.dimensions = 2 ** self.n_qubits
-        self.ops_done = 0
+        self.dimensions = 1 << n_qubits
+        self.device = (
+            device
+            if device is not None
+            else torch.device(
+                "mps"
+                if torch.backends.mps.is_available()
+                else "cuda"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
+        )
+
+        self._system = BatchedQuantumSystem(
+            n_qubits=n_qubits,
+            n_bits=n_bits,
+            batch_size=1,
+            device=self.device,
+        )
+
+        if state_vector is not None:
+            flat = state_vector.reshape(-1)
+            if int(flat.shape[0]) != self.dimensions:
+                raise ValueError(
+                    f"State vector must have {self.dimensions} amplitudes for {n_qubits} qubits, "
+                    f"got shape {tuple(state_vector.shape)}"
+                )
+            self._system.state_vectors[0] = flat.to(dtype=torch.complex64, device=self.device)
+
+        self._sync_views()
+
+    def _sync_views(self) -> None:
+        self.state_vector = self._system.state_vectors[0].unsqueeze(1)
+        if self.n_bits == 0:
+            self.bit_register = []
+        else:
+            self.bit_register = [int(v) for v in self._system.bit_registers[0].cpu().tolist()]
 
     def get_distribution(self) -> torch.Tensor:
         return torch.abs(self.state_vector) ** 2
@@ -1150,115 +991,32 @@ class QuantumSystem:
         return result
 
     def sample(self, num_shots: int) -> list[int]:
-        distribution = self.get_distribution().T  # Convert (n, 1) to (1, n) for multinomial
-        values = torch.multinomial(distribution, num_shots, replacement=True)
-        return [int(x.item()) for x in values[0]]
+        probs = torch.abs(self._system.state_vectors[0]) ** 2
+        probs = probs / probs.sum().clamp_min(1e-12)
+        values = torch.multinomial(probs, num_shots, replacement=True)
+        return [int(v) for v in values.cpu().tolist()]
+
+    @torch.inference_mode()
+    def apply_gate(self, gate: Gate) -> "QuantumSystem":
+        _ = self._system.apply_gate(gate)
+        self._sync_views()
+        return self
+
+    @torch.inference_mode()
+    def apply_measurement(self, measurement: Measurement) -> "QuantumSystem":
+        _ = self._system.apply_measurement(measurement)
+        self._sync_views()
+        return self
 
     @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "QuantumSystem":
-        #print(f"Applying operation {self.ops_done}")
-        self.ops_done = self.ops_done + 1
-
         if isinstance(operation, Gate):
             return self.apply_gate(operation)
-
         if isinstance(operation, Measurement):
             return self.apply_measurement(operation)
 
         if self.get_bits_value() == operation.condition:
-            return self.apply_one(operation.gate)
-        else:
-            return self
-
-    @torch.inference_mode()
-    def apply_measurement(self, measurement: Measurement) -> "QuantumSystem":
-        """Note: this will collapse |ψ⟩ state at that qubit.
-        """
-        qubit = measurement.qubit
-        bit = measurement.bit
-
-        if qubit < 0 or qubit >= self.n_qubits:
-            raise ValueError(f"Qubit index {qubit} out of range [0, {self.n_qubits})")
-        if bit < 0 or bit >= self.n_bits:
-            raise ValueError(f"Classical bit index {bit} out of range [0, {self.n_bits})")
-
-        indices = torch.arange(1 << self.n_qubits, device=self.device)
-        bitpos = self.n_qubits - 1 - qubit
-
-        # True on basis states with target qubit set to |1⟩
-        mask_1 = ((indices >> bitpos) & 1).bool()
-        probs = self.get_distribution().flatten()
-        p1 = probs[mask_1].sum()
-        outcome = 1 if torch.rand(1).item() < p1 else 0
-        self.bit_register[bit] = outcome
-
-        # Build projection operator: project onto |outcome⟩ for the target qubit
-        P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
-
-        # Apply projection using the quantum gate machinery
-        P_full = self._gate_to_qubit(P, n_targets=1, offset=qubit)
-
-        # update state vector
-        self.state_vector = P_full @ self.state_vector
-        norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
-        self.state_vector = self.state_vector / norm
-
-        return self
-
-    @torch.inference_mode()
-    def apply_gate(self, gate: Gate) -> "QuantumSystem":
-        """Apply a quantum gate to the state vector: |ψ⟩ → G |ψ⟩"""
-        targets = gate.targets
-        tensor = gate.tensor
-        n_targets = len(targets)
-
-        # Validate targets
-        if n_targets == 0:
-            raise ValueError("Must specify at least one target qubit")
-        for target in targets:
-            if target < 0 or target >= self.n_qubits:
-                raise ValueError(f"Target qubit {target} out of range [0, {self.n_qubits})")
-        if len(set(targets)) != len(targets):
-            raise ValueError(f"Duplicate target qubits not allowed: {targets}")
-
-        # Validate gate dimensions
-        expected_dim = 1 << n_targets
-        if tensor.shape != (expected_dim, expected_dim):
-            raise ValueError(f"Gate matrix must have shape ({expected_dim}, {expected_dim}) for {n_targets} target(s), got {tensor.shape}")
-
-        swaps: list[torch.Tensor] = []
-        positions = list(range(self.n_qubits))          # current location of each qubit
-
-        # ---- 1. move the target qubits to the *lowest* positions (0, 1, 2, …) ----
-        # This corresponds to the leftmost positions in the Kronecker product
-        for i in range(n_targets):
-            target = targets[i]                         # original qubit index
-            desired_pos = i                              # 0, 1, 2, …
-            cur_pos = positions.index(target)
-
-            if cur_pos != desired_pos:
-                S = self._get_swap_matrix(cur_pos, desired_pos)
-                swaps.append(S)
-                # update tracking
-                positions[cur_pos], positions[desired_pos] = positions[desired_pos], positions[cur_pos]
-
-        # ---- 2. swap the state vector to the new ordering ----
-        for u in swaps:
-            self.state_vector = u @ self.state_vector
-
-        # ---- 3. apply the gate on the *left-most* (highest) dimensions ----
-        gate_full = self._gate_to_qubit(tensor.to(self.device), n_targets)
-        self.state_vector = gate_full @ self.state_vector
-
-        # ---- 4. undo the swaps (they are their own inverse) ----
-        for u in reversed(swaps):
-            self.state_vector = u @ self.state_vector
-
-        # ---- 5. renormalise (safety) ----
-        norm = torch.sqrt(torch.sum(torch.abs(self.state_vector) ** 2))
-        assert torch.allclose(norm, torch.tensor(1.0, device=self.device), atol=1e-5), f"Norm drift: {norm}"
-        self.state_vector = self.state_vector / norm
-
+            return self.apply_gate(operation.gate)
         return self
 
     @torch.inference_mode()
@@ -1268,98 +1026,10 @@ class QuantumSystem:
                 _ = self.apply_circuit(operation)
             else:
                 _ = self.apply_one(operation)
-
         return self
 
-    def _gate_to_qubit(self, gate: torch.Tensor, n_targets: int = 1, offset: int = 0) -> torch.Tensor:
-
-        I = torch.eye(2, dtype=gate.dtype, device=gate.device)
-
-        # Build list of local operators for each qubit
-        factors = [*[I for _ in range(offset)], gate, *[I for _ in range(self.n_qubits - n_targets - offset)]]
-        # Kronecker product left-to-right
-        full = factors[0]
-        for f in factors[1:]:
-            full = torch.kron(full, f)
-
-        return full
-
-    def _get_swap_matrix(self, target_1: int, target_2: int) -> torch.Tensor:
-
-        # 2 ** self.n_qubits with bitshift operator
-        dim = 1 << self.n_qubits
-
-        S = torch.zeros((dim, dim), dtype=torch.complex64, device=self.device)
-        b1 = self.n_qubits - 1 - target_1
-        b2 = self.n_qubits - 1 - target_2
-
-        i, j = sorted((b1, b2))
-        mask = (1 << i) | (1 << j)
-
-        for x in range(dim):
-            bi = (x >> i) & 1
-            bj = (x >> j) & 1
-
-            if bi == bj:
-                y = x
-            else:
-                y = x ^ mask # flip both bits
-
-            S[y, x] = 1
-
-        return S
-
-    @override
     def __repr__(self) -> str:
-        """Pretty print the quantum state in basis notation."""
-        vec: npt.NDArray[np.complex64] = self.state_vector.cpu().numpy().flatten()
-        terms: list[str] = []
-
-        number_of_decimals = 10
-
-        for i in range(len(vec)):
-            val = cast(np.complex64, vec[i])
-            # Format the basis state |i⟩ as binary (big-endian: qubit 0 on left)
-            basis = format(i, f'0{self.n_qubits}b')  # Reverse for big-endian display
-
-            # Format the coefficient
-            real = float(np.real(val))
-            imag = float(np.imag(val))
-
-            # Skip negligible amplitudes for display purposes
-            magnitude = float(np.abs(val))  # pyright: ignore[reportAny]
-            if magnitude < 1e-10:
-                continue
-
-            if abs(imag) < 1e-10:
-                # Pure real
-                coef = f"{real:.{number_of_decimals}f}"
-            elif abs(real) < 1e-10:
-                # Pure imaginary
-                coef = f"{imag:.{number_of_decimals}f}i"
-            else:
-                # Complex
-                sign = "+" if imag >= 0 else "-"
-                coef = f"({real:.{number_of_decimals}f} {sign} {abs(imag):.{number_of_decimals}f}i)"
-
-            terms.append(f"{coef}|{basis}⟩")
-
-        if not terms:
-            return "|ψ⟩ = 0"
-
-        # Join with + signs, handling negative coefficients
-        result = "|ψ⟩ = "
-        for i, term in enumerate(terms):
-            if i == 0:
-                result += term
-            elif term.startswith("-"):
-                result += f" - {term[1:]}"
-            else:
-                result += f" + {term}"
-
-        # Add classical register display if we have classical bits
-        if self.n_bits > 0:
-            bit_string = "".join(str(b) for b in self.bit_register)
-            result += f"\tClassical register: {bit_string}"
-
-        return result
+        return (
+            f"QuantumSystem(n_qubits={self.n_qubits}, n_bits={self.n_bits}, "
+            f"device='{self.device.type}')"
+        )

@@ -95,8 +95,8 @@ If you are a coding agent working on this project:
 
 Latest full benchmark artifact:
 
-- Run: `benchmarks/results/2026-02-11T012820.jsonl`
-- Commit: `8fe4ed4`
+- Run: `benchmarks/results/2026-02-11T031009.jsonl`
+- Commit: `bab05d4`
 - Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
 ### Progress
@@ -107,9 +107,9 @@ Progress summary:
 
 | Scope | Baseline | Latest | Speedup |
 |---|---:|---:|---:|
-| Core-6 suite total @1000 (`3df121d` -> latest) | 370.99s | 0.081s | 4574.5x |
-| Expanded suite total @1000 (`2026-02-10T230611` -> latest) | 60.33s | 2.67s | 22.6x |
-| Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.85s | 207.8x |
+| Core-6 suite total @1000 (`3df121d` -> latest) | 370.99s | 0.086s | 4318.9x |
+| Expanded suite total @1000 (`2026-02-10T230611` -> latest) | 60.33s | 2.80s | 21.6x |
+| Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.76s | 214.8x |
 
 ### Latest SOTA Comparison
 
