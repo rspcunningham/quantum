@@ -4,11 +4,12 @@ A state-vector quantum circuit simulator built from scratch with PyTorch, target
 
 ![Optimization progress](docs/progress.png)
 
-| Scope | Baseline | Latest | Speedup |
-|---|---:|---:|---:|
-| Core-6 @1000 | 718.68s | 0.077s | 9,375x |
-| Expanded suite @1000 | 60.33s | 2.48s | 24x |
-| Expanded suite @10000 | 592.91s | 2.48s | 239x |
+| Shots | Baseline | Current | Speedup |
+|---:|---:|---:|---:|
+| @1 | 150.39s | 0.024s | 6,300x |
+| @10 | 156.37s | 0.019s | 8,100x |
+| @100 | 210.54s | 0.019s | 11,400x |
+| @1000 | 718.68s | 0.019s | 38,400x |
 
 Raw data: [`docs/progress-data.md`](docs/progress-data.md). Detailed run log: [`docs/experiment-log.md`](docs/experiment-log.md).
 

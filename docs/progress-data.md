@@ -49,7 +49,20 @@ Data source files are in `benchmarks/results/` and are listed below in plotting 
 | 23 | `2026-02-11T133252.jsonl` | `56cc4bc` | `56cc4bc\n02-11T1332` | 0.0426 | 0.0431 | 0.0416 | 0.0436 | 0.0465 |
 | 24 | `2026-02-11T135339.jsonl` | `71eef13` | `71eef13\n02-11T1353` | 0.0238 | 0.0194 | 0.0185 | 0.0187 | 0.0230 |
 
+## SOTA Reference — Qiskit Aer (Core-6)
+
+Horizontal reference lines for the progress chart. These are Aer's core-6 totals per shot count — a fixed target measured once. **Do not re-run** the comparison each iteration; just read the values below.
+
+| shot_count | aer_total_s |
+|---:|---:|
+| 1 | 0.0146 |
+| 10 | 0.0157 |
+| 100 | 0.0161 |
+| 1000 | 0.0194 |
+| 10000 | 0.0566 |
+
 ## Notes
 
 - `null` means the checkpoint did not record that shot count for at least one core-6 case.
 - The plotted line for a series is therefore discontinuous where `null` appears.
+- SOTA reference values of `null` mean the comparison has not been run yet. Once populated, they are plotted as horizontal dashed lines on `docs/progress.png`.
