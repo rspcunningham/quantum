@@ -140,9 +140,10 @@ Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted �
 ### 6. Evaluate
 
 Compare the new run against the prior baseline:
-- **Correctness**: all cases must PASS. A faster but incorrect simulator is useless.
+- **Correctness**: all complete cases must PASS. Any correctness failure (FAIL) is a hard blocker — revert immediately. Aborted cases (OOM or timeout) are not failures; they're excluded from totals and don't cause exit code 1. However, the long-term goal is **zero aborted cases** — every case should complete within the timeout. If a previously-passing case now gets aborted, that's a performance regression.
 - **Broad improvement**: check static totals AND dynamic totals at both @1000 and @10000. An optimization that helps one family but regresses another is suspect.
 - **Shot scaling**: compare @1000 vs @10000 for static circuits. If they scale linearly, unitary evolution is leaking into the shot loop (an algorithmic bug, not a micro-optimization problem).
+- **Cases complete**: compare against the prior run's `cases_complete` count. More complete cases = progress. Fewer = regression.
 
 For SOTA comparison against Qiskit Aer and Google qsim:
 
@@ -169,9 +170,16 @@ After each iteration, update three things:
 
 **a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metric, verdict. The result metric is the full-suite total @1000 for complete cases (format: `Xs (N cases)`).
 
-**b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md` with the full-suite totals from the new benchmark run. Only include cases that completed all 5 shot counts in the totals. Cases that OOM are excluded. Record the `cases_complete` count.
+**b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md`. Extract the data from the `.summary.json` file written alongside the JSONL:
+- `total_*_s` columns: from `totals_s.all` (these already exclude aborted/incomplete cases)
+- `cases_complete`: from `counts.cases_complete`
+- `checkpoint_jsonl`: the JSONL filename (e.g., `2026-02-11T172533.jsonl`)
+- `git_hash`: from any result row's `git_hash` field
+- `label_x`: format as `` `{git_hash}\n{MM-DD}T{HHMM}` `` (extracted from the JSONL filename timestamp)
 
-For core-6 tracking (legacy, saturated): the core-6 data lives in `docs/progress-data-core.md`. The core-6 cases are: `bell_state`, `simple_grovers`, `real_grovers`, `ghz_state`, `qft`, `teleportation`.
+Alternatively, compute totals directly from the JSONL: for each shot count, sum `times_s[shot]` across all rows where `aborted` is `false` and all 5 shot counts are present in `times_s`.
+
+Core-6 tracking is legacy (saturated). The core-6 data lives in `docs/progress-data-core.md` — do not update it during normal optimization iterations.
 
 **c) Progress chart** — first, **read the existing `docs/progress.png`** to see what the current chart looks like. Then regenerate it from the updated `docs/progress-data.md`. Write a one-off Python script that reads the table, plots the series (log-scale Y, one line per shot count), and saves the PNG. Use `matplotlib` (available in the project venv). Don't commit the script — just run it ephemerally and commit the resulting image. After generating, **read the new image** to verify it looks correct and to inform your next hypothesis — the shape of the curves tells you where the remaining headroom is.
 

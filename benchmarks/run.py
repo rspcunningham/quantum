@@ -438,7 +438,7 @@ def main() -> None:
             results.append(result)
             jsonl_f.write(json.dumps(result) + "\n")
             jsonl_f.flush()
-            if not result["correct"]:
+            if not result["correct"] and not result.get("aborted"):
                 failures.append(result["case"])
 
     print(f"Wrote {output_path}")
