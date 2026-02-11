@@ -119,11 +119,7 @@ After each iteration, update three things:
 
 **b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md` with the core-6 totals from the new benchmark run. The core-6 cases are: `bell_state`, `simple_grovers`, `real_grovers`, `ghz_state`, `qft`, `teleportation`. Extract their per-shot-count totals from the JSONL and add a new row. Update the `annotation` on the previous "Current" row to blank and mark the new row as "Current".
 
-**c) Progress chart** — regenerate `docs/images/progress.png` by running the chart generation script. This script reads the data table from `docs/progress-data.md` and produces the chart. Run it with:
-
-```bash
-uv run python3 scripts/plot_progress.py
-```
+**c) Progress chart** — regenerate `docs/images/progress.png` from the data in `docs/progress-data.md`. Write a one-off Python script that reads the table, plots the series (log-scale Y, one line per shot count), and saves the PNG. Use `matplotlib` (available in the project venv). Don't commit the script — just run it ephemerally and commit the resulting image.
 
 Commit all three updates together after a successful iteration.
 
