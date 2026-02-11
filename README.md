@@ -10,7 +10,7 @@ A state-vector quantum circuit simulator built from scratch with PyTorch, target
 | Expanded suite @1000 | 60.33s | 2.48s | 24x |
 | Expanded suite @10000 | 592.91s | 2.48s | 239x |
 
-Raw data: [`docs/progress-data.md`](docs/progress-data.md). Detailed run log: [`docs/02-attempt-history.md`](docs/02-attempt-history.md).
+Raw data: [`docs/progress-data.md`](docs/progress-data.md). Detailed run log: [`docs/experiment-log.md`](docs/experiment-log.md).
 
 ## Why this exists
 
@@ -82,5 +82,5 @@ See `examples/` for standalone scripts: a Bell state, a simple Grover's search, 
 | `src/quantum/gates.py` | Gate types and circuit API |
 | `OPTIMIZE.md` | Optimization workflow guide |
 | `benchmarks/` | Benchmark harness, profiler, SOTA comparison |
-| `docs/02-attempt-history.md` | Experiment log |
+| `docs/experiment-log.md` | Experiment log |
 | `docs/progress-data.md` | Raw progress chart data |

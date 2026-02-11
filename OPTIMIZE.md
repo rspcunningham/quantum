@@ -115,7 +115,7 @@ uv run bench-compare-report benchmarks/results/compare-<timestamp>.jsonl
 
 After each iteration, update three things:
 
-**a) Attempt history** — append a row to `docs/02-attempt-history.md` following the existing ledger format. Include: commit hash, hypothesis, measured result, verdict (worked / did not work), evidence artifact paths.
+**a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, core-6 @1000 result, verdict.
 
 **b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md` with the core-6 totals from the new benchmark run. The core-6 cases are: `bell_state`, `simple_grovers`, `real_grovers`, `ghz_state`, `qft`, `teleportation`. Extract their per-shot-count totals from the JSONL and add a new row. Update the `annotation` on the previous "Current" row to blank and mark the new row as "Current".
 
@@ -143,7 +143,7 @@ After each iteration, update three things:
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
 | `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
 | `benchmarks/cases/` | Benchmark case definitions — do not modify |
-| `docs/02-attempt-history.md` | Experiment log (what was tried, what worked, what didn't) |
+| `docs/experiment-log.md` | Experiment log (what was tried, what worked, what didn't) |
 | `docs/progress-data.md` | Raw data for the progress chart |
 
 ## Anti-patterns
