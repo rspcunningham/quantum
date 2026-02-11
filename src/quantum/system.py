@@ -68,7 +68,11 @@ class BatchedQuantumSystem:
     _measurement_weights: dict[int, torch.Tensor]
     _gate_tensors: dict[int, torch.Tensor]
     _gate_diagonals: dict[int, torch.Tensor]
+    _gate_permutations: dict[int, torch.Tensor]
+    _gate_permutation_factors: dict[int, torch.Tensor]
     _diagonal_subindices: dict[tuple[int, ...], torch.Tensor]
+    _permutation_source_indices: dict[tuple[tuple[int, ...], int], torch.Tensor]
+    _permutation_phase_factors: dict[tuple[tuple[int, ...], int], torch.Tensor]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
@@ -79,7 +83,11 @@ class BatchedQuantumSystem:
         self._measurement_weights = {}
         self._gate_tensors = {}
         self._gate_diagonals = {}
+        self._gate_permutations = {}
+        self._gate_permutation_factors = {}
         self._diagonal_subindices = {}
+        self._permutation_source_indices = {}
+        self._permutation_phase_factors = {}
 
         # Initialize all state vectors to |000...0⟩
         # Shape: (batch_size, 2^n_qubits) - each row is a state vector
@@ -101,6 +109,8 @@ class BatchedQuantumSystem:
         """
         if gate.diagonal is not None:
             return self._apply_diagonal_gate(gate)
+        if gate.permutation is not None:
+            return self._apply_permutation_gate(gate)
 
         targets = gate.targets
         tensor = self._device_gate_tensor(gate.tensor)
@@ -144,6 +154,25 @@ class BatchedQuantumSystem:
         # from the target-qubit bit pattern for that basis state.
         factors = diagonal_device[subindex]  # (2^n,)
         self.state_vectors = self.state_vectors * factors.unsqueeze(0)
+        return self
+
+    def _apply_permutation_gate(self, gate: Gate) -> "BatchedQuantumSystem":
+        """Apply a monomial gate (permutation with optional row factors)."""
+        permutation = gate.permutation
+        assert permutation is not None
+
+        permutation_device = self._device_gate_permutation(permutation)
+        targets = tuple(gate.targets)
+        source_indices = self._permutation_source_indices_for_targets(targets, permutation_device)
+        state = self.state_vectors[:, source_indices]
+
+        factors = gate.permutation_factors
+        if factors is not None:
+            factors_device = self._device_gate_permutation_factors(factors)
+            phase_factors = self._permutation_phase_factors_for_targets(targets, factors_device)
+            state = state * phase_factors.unsqueeze(0)
+
+        self.state_vectors = state
         return self
 
     @torch.inference_mode()
@@ -228,6 +257,37 @@ class BatchedQuantumSystem:
         self._gate_diagonals[key] = moved
         return moved
 
+    def _device_gate_permutation(self, permutation: torch.Tensor) -> torch.Tensor:
+        """Cache gate permutations on device."""
+        key = id(permutation)
+        cached = self._gate_permutations.get(key)
+        if cached is not None:
+            return cached
+
+        permutation_i64 = permutation.to(dtype=torch.int64)
+        if permutation_i64.device == self.device:
+            self._gate_permutations[key] = permutation_i64
+            return permutation_i64
+
+        moved = permutation_i64.to(self.device)
+        self._gate_permutations[key] = moved
+        return moved
+
+    def _device_gate_permutation_factors(self, factors: torch.Tensor) -> torch.Tensor:
+        """Cache monomial gate row factors on device."""
+        key = id(factors)
+        cached = self._gate_permutation_factors.get(key)
+        if cached is not None:
+            return cached
+
+        if factors.device == self.device:
+            self._gate_permutation_factors[key] = factors
+            return factors
+
+        moved = factors.to(self.device)
+        self._gate_permutation_factors[key] = moved
+        return moved
+
     def _diagonal_subindex_for_targets(self, targets: tuple[int, ...]) -> torch.Tensor:
         """Map basis indices to diagonal-entry indices for target qubits."""
         cached = self._diagonal_subindices.get(targets)
@@ -246,6 +306,52 @@ class BatchedQuantumSystem:
 
         self._diagonal_subindices[targets] = subindex
         return subindex
+
+    def _permutation_source_indices_for_targets(
+        self,
+        targets: tuple[int, ...],
+        permutation: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map output basis indices to input basis indices for a target-local permutation."""
+        key = (targets, id(permutation))
+        cached = self._permutation_source_indices.get(key)
+        if cached is not None:
+            return cached
+
+        indices = torch.arange(1 << self.n_qubits, device=self.device, dtype=torch.int64)
+        subindex = self._diagonal_subindex_for_targets(targets)
+        source_subindex = permutation[subindex]
+
+        target_mask = 0
+        for target in targets:
+            target_mask |= 1 << (self.n_qubits - 1 - target)
+        clear_mask = (1 << self.n_qubits) - 1 - target_mask
+
+        source_indices = indices & clear_mask
+        k = len(targets)
+        for out_pos, target in enumerate(targets):
+            bitpos = self.n_qubits - 1 - target
+            bit = (source_subindex >> (k - out_pos - 1)) & 1
+            source_indices = source_indices | (bit << bitpos)
+
+        self._permutation_source_indices[key] = source_indices
+        return source_indices
+
+    def _permutation_phase_factors_for_targets(
+        self,
+        targets: tuple[int, ...],
+        factors: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map local monomial row factors to all global basis indices."""
+        key = (targets, id(factors))
+        cached = self._permutation_phase_factors.get(key)
+        if cached is not None:
+            return cached
+
+        subindex = self._diagonal_subindex_for_targets(targets)
+        phase_factors = factors[subindex]
+        self._permutation_phase_factors[key] = phase_factors
+        return phase_factors
 
     @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "BatchedQuantumSystem":
