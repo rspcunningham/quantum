@@ -236,7 +236,7 @@ Progress summary:
 
 | Scope | Baseline | Latest | Speedup |
 |---|---:|---:|---:|
-| Core-6 suite total @1000 (`3df121d` -> latest) | 370.99s | 0.086s | 4318.9x |
+| Core-6 suite total @1000 (`bade1de` -> latest) | 718.68s | 0.077s | 9375.1x |
 | Expanded suite total @1000 (`2026-02-10T230611` -> latest) | 60.33s | 2.48s | 24.3x |
 | Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.48s | 239.1x |
 
