@@ -23,6 +23,7 @@ Implemented and validated:
 4. Diagonal gate metadata + diagonal fast path.
 5. Monomial/permutation metadata + permutation fast path.
 6. Terminal-measurement sampling fast path (single-shot evolution + multi-shot sampling for eligible static circuits).
+7. MPS terminal-sampler offload to CPU (removed MPS multinomial/bincount bottleneck).
 
 Attempted and rejected:
 
@@ -31,30 +32,39 @@ Reason: significant regressions on MPS; reverted.
 
 ## Current Bottleneck View
 
-From `benchmarks/results/2026-02-10T234124.jsonl`:
+From `benchmarks/results/2026-02-10T235128.jsonl`:
 
-- Total @1000 is `4.76s` (from `60.33s`, `12.67x` faster).
-- Total @10000 is `5.23s` (from `592.91s`, `113.35x` faster).
+- Total @1000 is `2.96s` (from `60.33s`, `20.38x` faster vs expanded baseline).
+- Total @10000 is `3.17s` (from `592.91s`, `186.74x` faster vs expanded baseline).
 - 22/22 runnable cases remain correct (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`).
 
-Post-H0 time concentration at 10000 shots:
+Post-H0/H0.1 time concentration at 10000 shots:
 
-- `reversible_mix_15`: `1.45s` (`27.8%`)
-- `adaptive_feedback_5q`: `1.26s` (`24.0%`)
-- `adaptive_feedback_120`: `0.87s` (`16.7%`)
-- `adaptive_feedback`: `0.32s` (`6.1%`)
+- `adaptive_feedback_5q`: `1.21s` (`38.0%`)
+- `adaptive_feedback_120`: `0.84s` (`26.5%`)
+- `adaptive_feedback`: `0.32s` (`10.0%`)
 
 Implications:
 
 - Shot-scaled static replay is no longer the dominant issue.
 - Remaining hotspots are:
-  - one-shot heavy unitary execution overhead (notably deep 15-qubit reversible mix)
-  - dynamic-feedback conditional/indexing overhead
+  - dynamic-feedback conditional/indexing overhead (now dominant)
+  - one-shot heavy unitary execution overhead in select deep circuits
   - persistent backend rank-limit coverage gap
 
 ## Next Hypotheses (Not Implemented Yet)
 
-### H1. Execution-Plan Compilation (Circuit IR)
+### H1. Dynamic-Circuit Conditional Path Rewrite (Highest Priority)
+
+Target adaptive-feedback bottlenecks:
+
+- avoid scalar sync in condition checks (`.item()` / Python bool hot path)
+- avoid expensive boolean advanced indexing restore patterns
+- evaluate branch-group/shot-branching execution (group state vectors by classical condition path)
+
+Expected impact: high on current post-H0 totals because adaptive-feedback workloads now dominate suite runtime.
+
+### H2. Execution-Plan Compilation (Circuit IR)
 
 Compile a circuit into reusable execution segments and artifacts:
 
@@ -62,9 +72,9 @@ Compile a circuit into reusable execution segments and artifacts:
 - precompute operation metadata, device tensors, index maps, and dispatch kernel choice
 - reduce runtime Python branching and repeated cache lookups
 
-Expected impact: broad, moderate-to-high improvement, especially for deep one-shot unitary cases where index-map/setup overhead is now visible.
+Expected impact: broad, moderate-to-high improvement and enabling infrastructure for both static fusion and dynamic branch execution.
 
-### H2. Gate Fusion Within Unitary Segments
+### H3. Gate Fusion Within Unitary Segments
 
 Within safe boundaries, fuse adjacent compatible gates to reduce full-state passes:
 
@@ -75,7 +85,7 @@ Within safe boundaries, fuse adjacent compatible gates to reduce full-state pass
 
 Expected impact: high for deep circuits with many small gates.
 
-### H3. Reduce Copy/Layout Overhead in Gate Application
+### H4. Reduce Copy/Layout Overhead in Gate Application
 
 Reduce full-state layout thrash in dense/permutation application:
 
@@ -84,16 +94,6 @@ Reduce full-state layout thrash in dense/permutation application:
 - reduce repeated full-state gathers where a cheaper formulation exists on MPS
 
 Expected impact: moderate on remaining dense/permutation-heavy one-shot hotspots.
-
-### H4. Dynamic-Circuit Conditional Path Rewrite
-
-Target adaptive-feedback bottlenecks:
-
-- avoid scalar sync in condition checks (`.item()` / Python bool hot path)
-- avoid expensive boolean advanced indexing restore patterns
-- investigate branch-group/shot-branching style execution for repeated feedback loops
-
-Expected impact: moderate-to-high on feedback workloads, which are now a large share of post-H0 totals.
 
 ### H5. Address MPS Rank-Limit Failure Path
 

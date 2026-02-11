@@ -20,6 +20,7 @@ This document is the canonical record of what has been tried, what worked, and w
 | 6 | Uncommitted experiment, reverted | Replace global permutation gather with local-axis `index_select` path. | Regressed strongly on MPS: `real_grovers` `15.67s -> 22.99s`; `toffoli_oracle_13` `10.85s -> 17.55s` at 10k. | Did not work (reverted) | `2026-02-10T221843.jsonl` vs `2026-02-10T215408.jsonl` |
 | 7 | `a6c5d1b` | Expand benchmark to broad synthetic always-on families (no core/extended split). | Suite expanded from 16 configured cases to 24 configured cases (22 runnable on MPS). New expanded baseline @10k: `592.91s`. | Worked (coverage) | `2026-02-10T230611.jsonl` |
 | 8 | `4e4b2cb` | Terminal-measurement sampling fast path: for circuits without conditionals/non-terminal measurements, evolve once and sample many shots from final distribution. | Expanded suite totals: @1000 `60.33s -> 4.76s` (`12.67x`), @10000 `592.91s -> 5.23s` (`113.35x`). 22/22 runnable cases still PASS. | Worked (major) | `2026-02-10T230611.jsonl` vs `2026-02-10T234124.jsonl` |
+| 9 | `7fbe06b` | On MPS terminal-measurement fast path, sample/count on CPU instead of MPS (`multinomial`/`bincount` offload) to avoid backend sampler overhead and sync stalls. | Expanded suite totals: @1000 `4.76s -> 2.96s` (`1.61x`), @10000 `5.23s -> 3.17s` (`1.65x`). 22/22 runnable cases still PASS. | Worked | `2026-02-10T234124.jsonl` vs `2026-02-10T235128.jsonl` |
 
 ## Current Benchmark Scope
 
@@ -39,15 +40,18 @@ Always-on suite now includes:
 
 ## Latest Baseline (Expanded Suite)
 
-Run: `benchmarks/results/2026-02-10T234124.jsonl`
+Run: `benchmarks/results/2026-02-10T235128.jsonl`
 
 - Completed cases: 22
 - Correctness: 22/22 PASS
-- Total @1000: `4.76s`
-- Total @10000: `5.23s`
+- Total @1000: `2.96s`
+- Total @10000: `3.17s`
 - Speedup vs prior expanded baseline (`2026-02-10T230611.jsonl`):
-  - @1000: `12.67x`
-  - @10000: `113.35x`
+  - @1000: `20.38x`
+  - @10000: `186.74x`
+- Speedup vs post-H0 baseline (`2026-02-10T234124.jsonl`):
+  - @1000: `1.61x`
+  - @10000: `1.65x`
 
 Known backend-limit failures (not OOM):
 
@@ -61,7 +65,8 @@ What worked:
 1. Removing asymptotic waste (`O(4^n)` matrix build paths) produced the first major wins.
 2. Structural gate specialization (diagonal, then permutation) produced the next major wins.
 3. Terminal-measurement sampling fast path produced the largest single step on the expanded suite by removing shot-scaled unitary replay on static circuits.
-4. Cache cleanup/memory-transfer cleanup gave smaller but real gains.
+4. On MPS, terminal-measurement sampling/counting offload to CPU removed a backend-specific sampler bottleneck and delivered another broad step improvement.
+5. Cache cleanup/memory-transfer cleanup gave smaller but real gains.
 
 What did not:
 
@@ -70,4 +75,4 @@ What did not:
 What changed strategically:
 
 1. Benchmarking is now broad and always-on; optimization work is measured against general simulator behavior, not narrow case subsets.
-2. Post-H0 bottlenecks shifted: dynamic/feedback execution and one-shot heavy unitary evolution costs now dominate over shot-scaled static replay.
+2. Post-H0/H0.1 bottlenecks shifted decisively to dynamic/feedback execution paths; static terminal-measurement circuits are now relatively cheap.

@@ -125,6 +125,13 @@ Latest expanded-suite result after terminal-measurement sampling fast path:
 - Total @10000 shots: `5.23s` (`113.35x` faster vs expanded baseline)
 - Completed correctness: 22/22 PASS (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
+Latest expanded-suite result after MPS terminal-sampler offload:
+- Run: `benchmarks/results/2026-02-10T235128.jsonl`
+- Commit: `7fbe06b`
+- Total @1000 shots: `2.96s` (`20.38x` faster vs expanded baseline, `1.61x` vs post-H0)
+- Total @10000 shots: `3.17s` (`186.74x` faster vs expanded baseline, `1.65x` vs post-H0)
+- Completed correctness: 22/22 PASS (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
+
 ## Setup
 
 ```bash

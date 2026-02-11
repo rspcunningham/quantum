@@ -58,6 +58,15 @@ Why it worked:
 - Removed unnecessary `O(num_shots * gates * 2^n)` replay in static circuits.
 - Restored first-principles shot behavior: one unitary evolution plus independent sampling.
 
+### 6. MPS sampler offload (terminal fast path)
+
+On MPS, offloading terminal sampling/counting from device kernels to CPU improved broad static-case performance.
+
+Why it worked:
+
+- `torch.multinomial` / `bincount` on MPS incurred significant backend overhead and sync cost at these shapes.
+- Final-distribution transfer size is small relative to full-state gate evolution cost, so CPU sampling won overall.
+
 ## What Did Not Work
 
 ### Local-axis permutation `index_select` path on MPS
@@ -84,13 +93,13 @@ Current traces indicate:
 
 - Pre-H0 heavy static cases were dominated by `aten::copy_` / `aten::to`.
 - Post-H0, dominant costs are now concentrated in:
-  - one-shot unitary evolution overhead for deep/high-qubit cases
   - dynamic-feedback indexing/scalar-sync paths (`nonzero` / `index` / `item`)
+  - one-shot unitary evolution overhead for selected deep/high-qubit cases
 
 This shifts optimization focus to:
 
-1. reduce one-shot unitary overhead (fewer passes, fewer expensive index-map builds)
-2. reduce dynamic conditional/indexing overhead
+1. reduce dynamic conditional/indexing overhead
+2. reduce one-shot unitary overhead (fewer passes, fewer expensive index-map builds)
 3. reduce runtime dispatch overhead with compiled execution plans
 
 ## Benchmark Strategy Finding
@@ -108,6 +117,6 @@ Now adopted:
 Most promising next directions:
 
 1. execution-plan compilation (segment + precompute)
-2. gate fusion inside unitary segments
-3. dynamic conditional path optimization
+2. dynamic conditional path optimization
+3. gate fusion inside unitary segments
 4. MPS rank-limit-safe execution for higher-qubit coverage
