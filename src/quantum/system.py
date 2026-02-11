@@ -669,6 +669,11 @@ def _run_compiled_simulation(
     if num_shots == 0:
         return {}
 
+    # For small circuits, CPU avoids MPS kernel launch overhead (~170μs/gate)
+    # and item() sync costs (~108μs/call). Wins for both static and dynamic paths.
+    if n_qubits <= 14 and device.type != "cpu":
+        device = torch.device("cpu")
+
     compiled = _compile_execution_graph(circuit)
 
     # Preprocess: fuse consecutive diagonal and permutation gate runs
