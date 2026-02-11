@@ -85,7 +85,21 @@ Likely reason:
 
 Conclusion:
 
-- “Smaller local indexing” is not automatically faster; backend-specific memory behavior must be measured, not inferred.
+- "Smaller local indexing" is not automatically faster; backend-specific memory behavior must be measured, not inferred.
+
+### Alternative gate contraction paths on MPS
+
+Tested `torch.einsum`, `torch.tensordot`, and flat-strided indexing as replacements for permute→reshape→matmul in dense gate application.
+
+Results:
+
+- `einsum`: consistently 5-20% slower than current path on MPS. Hard-crashes at 15+ qubits (MPS rank-16 limit: batch + 15 qubit dims + gate output dim = 17). Not viable.
+- `tensordot`: performance-neutral (within noise). Produces cleaner code by eliminating explicit permute/inverse-permute and the axis permutation cache. Adopted for clarity.
+- Flat-strided indexing: slower at low qubit counts, marginally faster at 15q. Not worth the complexity.
+
+Conclusion:
+
+- The `copy_` overhead in dense gate application on MPS is the inherent cost of the operation, not an artifact of the contraction strategy. Reducing gate count (fusion) is higher leverage than changing how each gate is applied.
 
 ## Backend-Specific Reality (MPS)
 

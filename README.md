@@ -71,32 +71,159 @@ Expanded synthetic families (randomized but reproducible with fixed seeds) are i
 
 ## Optimization workflow
 
-The core development loop:
+### Philosophy
 
-1. **Reason** — review benchmark data, code, and prior runs
-2. **Hypothesize** — decide one concrete change to test
-3. **Implement** — apply the change in `src/quantum/system.py`
-4. **Commit** — commit before running benchmarks
-5. **Benchmark** — run `uv run bench -v` and evaluate correctness + timing
-6. **Repeat** — use results to drive the next hypothesis
+This is a **general-purpose quantum simulator**. The benchmark suite exists to quantify progress, not to define it. Solving for one special case doesn't help — any optimization must improve the simulator's general performance across diverse circuit structures. Clean, DRY, modern Python is paramount; clever-but-messy code that saves a few percent is not worth the maintenance cost.
 
-The multiple shot counts (1, 10, 100, 1000, 10000) surface optimizations that behave differently at different batch sizes. The correctness check guards against regressions.
+### Scope
 
-### For coding agents
+- **Optimization target**: `src/quantum/system.py` only. Do not modify `gates.py` or benchmark cases.
+- **Code quality**: Keep `system.py` clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases.
 
-If you are a coding agent working on this project:
+### The loop
 
-- The optimization target is `src/quantum/system.py`. Do not modify `gates.py` or the benchmark cases.
-- Run `uv run bench -v` after every change. Always commit after modifying code but before running the benchmark.
-- The benchmark must pass all correctness checks. A faster but incorrect simulator is useless.
-- Before making code changes, develop a well-reasoned hypothesis about the potential impact on performance. After running the benchmark, compare the results with previous runs to evaluate the effectiveness of the optimization and the accuracy of the hypothesis. Use this information to construct your next hypothesis and guide future optimizations.
+```
+1. Profile    — identify where time is actually spent
+2. Hypothesize — form a concrete, falsifiable prediction
+3. Implement  — apply the change in src/quantum/system.py
+4. Commit     — commit before benchmarking (creates clean audit trail)
+5. Benchmark  — run full suite, evaluate correctness + timing
+6. Evaluate   — compare against prior run, accept or revert
+7. Record     — log outcome in docs/02-attempt-history.md
+```
+
+Each step in detail:
+
+#### 1. Profile
+
+Use `bench-trace` to identify the actual bottleneck before guessing.
+
+```bash
+# Profile a specific case at a specific shot count
+uv run bench-trace <case_name> <shots>
+
+# Examples:
+uv run bench-trace random_universal_14 1000
+uv run bench-trace adaptive_feedback_5q 10000
+
+# Smaller trace files (no stack traces):
+uv run bench-trace random_universal_14 1000 --no-stack
+```
+
+Output: a `torch.profiler` table (top 20 ops by CPU time) printed to stdout, plus a Chrome/Perfetto trace JSON at `benchmarks/results/trace_<case>_<shots>.json`. Open traces at `chrome://tracing` or `https://ui.perfetto.dev`.
+
+Focus on:
+- Which `aten::*` ops dominate self CPU time
+- Whether the bottleneck is compute (`mm`, `mul`) or movement (`copy_`, `to`, `_to_copy`)
+- Whether the bottleneck is indexing/control flow (`nonzero`, `index_put_`, `item`)
+
+#### 2. Hypothesize
+
+Before writing any code, state:
+- **What** you're changing
+- **Why** you expect it to help (linked to profiler evidence)
+- **Which circuit families** should improve (not just one case)
+- **What could go wrong** (correctness risk, regression on other families)
+
+Bad hypothesis: "Make `adaptive_feedback_5q` faster by caching its specific branch pattern."
+Good hypothesis: "Replacing per-measurement `nonzero` calls with multiplicative masking should reduce dynamic-circuit overhead across all feedback workloads, because profiler shows `nonzero` at 73% of CPU time in the dynamic path."
+
+#### 3. Implement
+
+Edit `src/quantum/system.py`. Priorities:
+- Structural clarity over micro-optimization
+- General solutions over case-specific fixes
+- Fewer full-state passes over faster individual passes
+
+#### 4. Commit
+
+Always commit **before** running benchmarks. This creates a 1:1 mapping between code states and benchmark artifacts for reproducibility and bisection.
+
+#### 5. Benchmark
+
+```bash
+# Full suite with per-case detail (primary command)
+uv run bench -v
+
+# Run specific cases only (for quick iteration during development)
+uv run bench -v --cases real_grovers qft adaptive_feedback_5q
+```
+
+The harness runs each case at shot counts `[1, 10, 100, 1000, 10000]` and checks correctness at the highest completed count against expected output distributions.
+
+**Output**:
+- Per-case: wall time, CPU time, ops/sec, memory, correctness (PASS/FAIL)
+- Summary: totals split by static/dynamic, hotspot analysis
+- Files: `benchmarks/results/<timestamp>.jsonl` + `.summary.json`
+
+#### 6. Evaluate
+
+Compare the new run against the prior baseline:
+- **Correctness**: all 22 cases must PASS. A faster but incorrect simulator is useless.
+- **Broad improvement**: check static totals AND dynamic totals at both @1000 and @10000. An optimization that helps one family but regresses another is suspect.
+- **Shot scaling**: compare @1000 vs @10000 for static circuits. If they scale linearly, unitary evolution is leaking into the shot loop (an algorithmic bug, not a micro-optimization problem).
+
+For SOTA comparison against Qiskit Aer and Google qsim:
+
+```bash
+# Full suite: native vs Aer (3 reps, median reported)
+uv run bench-compare -v
+
+# Static-only: native vs Aer vs qsim
+uv run bench-compare --suite static --backends native aer qsim -v
+
+# Specific cases only
+uv run bench-compare --cases bell_state qft -v
+
+# Generate markdown report from a compare JSONL
+uv run bench-compare-report benchmarks/results/compare-<timestamp>.jsonl
+```
+
+#### 7. Record
+
+Log the outcome in `docs/02-attempt-history.md` following the existing ledger format. Include: commit hash, hypothesis, measured result, verdict (worked / did not work), evidence artifact paths.
+
+### Interpreting results
+
+**Shot counts** `[1, 10, 100, 1000, 10000]` surface different behaviors:
+- Low shots (1, 10): dominated by fixed overhead (compilation, device transfer, warmup)
+- High shots (1000, 10000): dominated by per-shot or per-evolution costs
+
+**Static vs dynamic**: the harness classifies circuits automatically:
+- **Static**: no conditionals, terminal-only measurements → eligible for evolve-once/sample-many fast path
+- **Dynamic**: mid-circuit measurements and/or conditional gates → requires branch-based execution
+
+**Known failures**: `ghz_state_16` and `ghz_state_18` fail on MPS due to a tensor rank limit (MPS supports rank ≤ 16). These are backend-limit failures, not correctness bugs.
+
+### Key files
+
+| File | Purpose |
+|------|---------|
+| `src/quantum/system.py` | Simulation engine — the optimization target |
+| `src/quantum/gates.py` | Gate types and circuit API — do not modify |
+| `benchmarks/run.py` | Benchmark harness (`bench`) |
+| `benchmarks/trace.py` | Profiler (`bench-trace`) |
+| `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
+| `benchmarks/cases/` | Benchmark case definitions — do not modify |
+| `docs/02-attempt-history.md` | Canonical ledger of what was tried and what happened |
+| `docs/03-findings.md` | Stable validated conclusions |
+| `docs/04-roadmap.md` | Current hypotheses and priorities |
+| `docs/10-hypotheses-post-sota-2026-02-11.md` | Latest hypothesis set with SOTA context |
+
+### Anti-patterns
+
+- **Benchmark hacking**: special-casing code for a specific test case name or structure. The benchmark is a proxy for general performance, not the goal.
+- **Premature micro-optimization**: tuning constants or unrolling loops before fixing algorithmic issues (e.g., shot-scaled evolution).
+- **Guessing without profiling**: always run `bench-trace` before hypothesizing. Intuition about GPU bottlenecks is frequently wrong.
+- **Regressing correctness**: never trade correctness for speed. The tolerance check is the hard gate.
+- **Complexity without payoff**: if an optimization adds significant code complexity for <5% broad improvement, it's probably not worth it.
 
 ## Performance tracker
 
 Latest full benchmark artifact:
 
-- Run: `benchmarks/results/2026-02-11T031009.jsonl`
-- Commit: `bab05d4`
+- Run: `benchmarks/results/2026-02-11T112001.jsonl`
+- Commit: `a85bf9c`
 - Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
 ### Progress
@@ -110,8 +237,8 @@ Progress summary:
 | Scope | Baseline | Latest | Speedup |
 |---|---:|---:|---:|
 | Core-6 suite total @1000 (`3df121d` -> latest) | 370.99s | 0.086s | 4318.9x |
-| Expanded suite total @1000 (`2026-02-10T230611` -> latest) | 60.33s | 2.80s | 21.6x |
-| Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.76s | 214.8x |
+| Expanded suite total @1000 (`2026-02-10T230611` -> latest) | 60.33s | 2.48s | 24.3x |
+| Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.48s | 239.1x |
 
 ### Latest SOTA Comparison
 

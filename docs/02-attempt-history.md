@@ -28,6 +28,7 @@ This document is the canonical record of what has been tried, what worked, and w
 | 14 | Uncommitted analysis experiment | Force static circuits through branch engine (disable terminal-sampling fast path + force dynamic plan) to test unified-engine viability. | Regressed: across 18 static cases at 10000 shots, median total `0.9727s -> 1.4996s` (`1.54x` slower). Worst slowdowns include `ghz_state` (`3.14x`) and `simple_grovers` (`2.51x`). | Did not work | Direct monkeypatch timing experiment (shots=10000, reps=2) run on current tree. |
 | 15 | `b8ba108` (working tree benchmark state) | Refactor dynamic execution into a compiled edge/node graph: gate segments as edges, measurement/conditional as nodes, state-ID path sharing, and measurement-time signature dedup. | Dynamic subset (same code, native only) vs disabling branch engine: @10000 `3.72s -> 1.09s` (`3.41x`), @1000 `3.29s -> 1.07s` (`3.07x`). Full-suite run after refactor: @1000 `2.53s`, @10000 `2.53s`. | Worked (architecture + strong dynamic win vs fallback) | `2026-02-11T022010.jsonl` vs `2026-02-11T021916.jsonl`; full suite `2026-02-11T021936.jsonl`; trace `trace_adaptive_feedback_120_10000_graphir.json`. |
 | 16 | Uncommitted working tree | Unify execution orchestration: compile all circuits into one graph format and make `node_count == 0` use edge-only execution + terminal sink sampling (single executor entrypoint for static and dynamic). | Functional target achieved (single compiled executor path in `run_simulation`, static still uses sink fast path via zero-node branch). Static and dynamic correctness passed on targeted suite (`2026-02-11T024041.jsonl`). Full-suite reruns are noisy; current runs landed around `@10000 2.79s` (`2026-02-11T024138.jsonl`) with expected MPS failures unchanged (`ghz_state_16`, `ghz_state_18`). | Worked (architecture); perf impact inconclusive/noisy | `2026-02-11T024041.jsonl`; `2026-02-11T024103.jsonl`; `2026-02-11T024138.jsonl` |
+| 17 | `a85bf9c` | Replace permute→reshape→matmul→reshape→inverse-permute dense gate path with `torch.tensordot` contraction + `torch.movedim`. Eliminates `_axis_permutation_for_targets` helper and its cache. Gate tensors cached in ND `(2,)*2k` form. | Full suite: @1000 `2.48s`, @10000 `2.48s`. 22/22 PASS. Performance neutral (within MPS noise vs prior baseline). Code simplified: -31 lines, +8 lines. | Worked (simplification, perf-neutral) | `2026-02-11T112001.jsonl` |
 
 ## Current Benchmark Scope
 
@@ -47,18 +48,18 @@ Always-on suite now includes:
 
 ## Latest Baseline (Expanded Suite)
 
-Run: `benchmarks/results/2026-02-11T021936.jsonl`
+Run: `benchmarks/results/2026-02-11T112001.jsonl`
 
 - Completed cases: 22
 - Correctness: 22/22 PASS
-- Total @1000: `2.53s`
-- Total @10000: `2.53s`
+- Total @1000: `2.48s`
+- Total @10000: `2.48s`
 - Speedup vs expanded-suite baseline (`2026-02-10T230611.jsonl`):
-  - @1000: `23.85x`
-  - @10000: `234.60x`
+  - @1000: `24.33x`
+  - @10000: `239.08x`
 - Speedup vs post-H0.1 baseline (`2026-02-10T235128.jsonl`):
-  - @1000: `1.17x`
-  - @10000: `1.25x`
+  - @1000: `1.19x`
+  - @10000: `1.28x`
 
 Known backend-limit failures (not OOM):
 
@@ -80,6 +81,7 @@ What worked:
 9. Always routing dynamic circuits to the branch engine simplifies policy and avoids overfitting dispatch knobs; on current cases, it is behavior-equivalent to the previous thresholded routing.
 10. Compiling dynamic circuits into edge/node steps makes the control-flow model explicit and enables state-ID edge reuse, but merge/fingerprint overhead remains a major target for next-pass optimization.
 11. A unified executor entrypoint is feasible without sacrificing static sink behavior by treating static circuits as zero-node graphs.
+12. Replacing permute/matmul dense gate path with `tensordot` contraction simplifies the code (eliminates axis permutation helper + cache) with neutral performance on MPS. `einsum` was also tested but is consistently slower on MPS and hard-crashes at 15+ qubits due to MPS rank-16 limit.
 
 What did not:
 
