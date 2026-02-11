@@ -28,3 +28,4 @@ Machine: Apple M1 Max, 32 GB. Backend: PyTorch MPS.
 | F2 | (reverted) | Forced static circuits through branch engine (disabled terminal-sampling fast path). Regressed: median 1.54x slower across 18 static cases @10k. | — | Did not work |
 | 18 | `bab05d4` | Compiled edge/node dynamic graph executor. Unified static/dynamic into one graph format (static = zero-node graph). | 0.086s / 0.088s @10k | Worked (architecture) |
 | 19 | `a85bf9c` | Replaced permute/matmul dense gate path with `tensordot` contraction. Cleaner code, perf-neutral. `einsum` also tested — slower on MPS, crashes at 15q+. | 0.077s / 0.081s @10k | Worked (simplification) |
+| 20 | `4f3e387` | Stride-based slicing for 1q+2q dense gates with CPU scalar dispatch. Eliminates tensordot permutation copies (77% of CPU time) and per-gate MPS transfers (~450μs each). `random_universal_14` 2.4x faster. | 0.074s / 0.076s @10k | Worked (1.04x / 1.06x core-6; 2.4x on parameterized circuits) |
