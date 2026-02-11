@@ -1,6 +1,7 @@
 # Roadmap (Current)
 
 This plan is based on the completed attempt history in `docs/02-attempt-history.md`.
+Latest assessment context: `docs/06-assessment-hypotheses-2026-02-11.md`.
 
 ## Objective
 
@@ -29,20 +30,45 @@ Reason: significant regressions on MPS; reverted.
 
 ## Current Bottleneck View
 
-Post-diagonal/permutation traces show copy/transfer attribution dominating (`aten::copy_`, `aten::to`) with math (`aten::mm`) no longer primary in targeted heavy cases.
+From `benchmarks/results/2026-02-10T230611.jsonl`:
 
-Implication:
+- Total @10000 is `592.91s`.
+- Top 2 cases contribute `58.16%`.
+- Top 5 cases contribute `80.30%`.
+- 18/22 passing cases are unitary-until-terminal-measurement and contribute `590.55s` (`99.6%`) of @10000 runtime.
 
-- Next wins likely come from reducing memory movement and dispatch overhead per applied operation.
+From targeted profiler traces:
+
+- Heavy unitary cases are dominated by copy/transfer attribution (`aten::copy_`, `aten::to`) rather than math (`aten::mm`).
+- Dynamic-feedback cases are dominated by boolean indexing and scalar sync (`aten::nonzero`, `aten::index`, `aten::item` / `_local_scalar_dense`).
+
+Implications:
+
+- The biggest remaining win is algorithmic: avoid scaling unitary evolution with shot count when measurements are terminal.
+- The next tier is reducing full-state copy/layout churn and runtime dispatch overhead.
+- Dynamic-circuit performance requires dedicated conditional/branch handling, but this is currently a much smaller share of total suite time.
 
 ## Next Hypotheses (Not Implemented Yet)
 
+### H0. Terminal-Measurement Sampling Fast Path (Highest Priority)
+
+For circuits with:
+
+- no conditional gates, and
+- no non-terminal measurements
+
+execute the unitary portion once (single state vector), then sample outcomes for `num_shots` from the final probability distribution.
+
+Implementation design: `docs/07-design-h0-terminal-sampling.md`.
+
+Expected impact: very high, broad, and principled. Removes unnecessary `O(num_shots * gates * 2^n)` evolution for static circuits.
+
 ### H1. Execution-Plan Compilation (Circuit IR)
 
-Compile a circuit into execution segments and reusable per-op artifacts:
+Compile a circuit into reusable execution segments and artifacts:
 
 - segment by measurement/conditional boundaries
-- precompute operation metadata, device tensors, index maps, and dispatch kind
+- precompute operation metadata, device tensors, index maps, and dispatch kernel choice
 - reduce runtime Python branching and repeated cache lookups
 
 Expected impact: broad, moderate improvement across deep circuits.
@@ -54,19 +80,31 @@ Within safe boundaries, fuse adjacent compatible gates to reduce full-state pass
 - single-qubit chain fusion on same wire
 - commuting diagonal block fusion
 - permutation-chain fusion where valid
+- bounded dense fusion with explicit width cap (for example, <= 3 or <= 4 qubits)
 
 Expected impact: high for deep circuits with many small gates.
 
-### H3. Reduce Result/Measurement Sync Overhead
+### H3. Reduce Copy/Layout Overhead in Gate Application
 
-Minimize host-device synchronization and copy churn in measurement/result collection:
+Reduce full-state layout thrash in dense/permutation application:
 
-- audit `.cpu()`/sync barriers
-- keep operations device-side until required
+- avoid unnecessary permute->reshape materialization patterns
+- investigate lazy logical-to-physical qubit layout tracking
+- reduce repeated full-state gathers where a cheaper formulation exists on MPS
 
-Expected impact: small-to-moderate, especially for dynamic/measurement-heavy cases.
+Expected impact: moderate-to-high on dense-heavy workloads.
 
-### H4. Address MPS Rank-Limit Failure Path
+### H4. Dynamic-Circuit Conditional Path Rewrite
+
+Target adaptive-feedback bottlenecks:
+
+- avoid scalar sync in condition checks (`.item()` / Python bool hot path)
+- avoid expensive boolean advanced indexing restore patterns
+- investigate branch-group/shot-branching style execution for repeated feedback loops
+
+Expected impact: moderate on feedback workloads; lower aggregate impact on current suite totals.
+
+### H5. Address MPS Rank-Limit Failure Path
 
 Investigate application path for high-qubit cases that currently fail due tensor rank >16 on MPS.
 

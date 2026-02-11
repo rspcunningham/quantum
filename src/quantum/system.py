@@ -39,6 +39,129 @@ def infer_resources(circuit: Circuit) -> tuple[int, int]:
     return (max_qubit + 1, max_bit + 1)
 
 
+def _flatten_circuit_operations(
+    operations: Sequence[Gate | ConditionalGate | Measurement | Circuit],
+    out: list[Gate | ConditionalGate | Measurement],
+) -> None:
+    """Flatten nested circuits into a linear operation list."""
+    for operation in operations:
+        if isinstance(operation, Circuit):
+            _flatten_circuit_operations(operation.operations, out)
+        else:
+            out.append(operation)
+
+
+def _terminal_measurement_plan(
+    circuit: Circuit,
+) -> tuple[list[Gate], list[Measurement]] | None:
+    """Return (unitary_gates, terminal_measurements) when fast-path eligible.
+
+    Eligible circuits have:
+    - no ConditionalGate operations
+    - no gates after the first measurement
+    """
+    flattened: list[Gate | ConditionalGate | Measurement] = []
+    _flatten_circuit_operations(circuit.operations, flattened)
+
+    gates: list[Gate] = []
+    measurements: list[Measurement] = []
+    seen_measurement = False
+
+    for operation in flattened:
+        if isinstance(operation, ConditionalGate):
+            return None
+        if isinstance(operation, Measurement):
+            seen_measurement = True
+            measurements.append(operation)
+            continue
+
+        # Gate
+        if seen_measurement:
+            return None
+        gates.append(operation)
+
+    return gates, measurements
+
+
+def _counts_from_register_codes(
+    register_codes: torch.Tensor,
+    *,
+    n_bits: int,
+    num_shots: int,
+) -> dict[str, int]:
+    """Convert encoded classical-register integers to output count dict."""
+    if num_shots == 0:
+        return {}
+
+    if n_bits == 0:
+        return {"": num_shots}
+
+    counts: dict[str, int] = {}
+
+    # Dense histogram is fastest for benchmark-scale bit widths.
+    if n_bits <= 20:
+        histogram = torch.bincount(register_codes, minlength=1 << n_bits)
+        histogram_cpu = cast(npt.NDArray[np.int64], histogram.cpu().numpy())
+        for code, count in enumerate(histogram_cpu):
+            count_int = int(count)
+            if count_int:
+                counts[format(code, f"0{n_bits}b")] = count_int
+        return counts
+
+    # Fallback avoids allocating a dense 2^n histogram for large classical registers.
+    unique_codes, unique_counts = torch.unique(register_codes, return_counts=True, sorted=True)
+    unique_codes_cpu = cast(npt.NDArray[np.int64], unique_codes.cpu().numpy())
+    unique_counts_cpu = cast(npt.NDArray[np.int64], unique_counts.cpu().numpy())
+    for code, count in zip(unique_codes_cpu, unique_counts_cpu, strict=True):
+        count_int = int(count)
+        if count_int:
+            counts[format(int(code), f"0{n_bits}b")] = count_int
+    return counts
+
+
+@torch.inference_mode()
+def _run_terminal_measurement_sampling(
+    *,
+    circuit: Circuit,
+    num_shots: int,
+    n_qubits: int,
+    n_bits: int,
+    device: torch.device,
+) -> dict[str, int] | None:
+    """Fast path for static circuits with terminal measurements only."""
+    plan = _terminal_measurement_plan(circuit)
+    if plan is None:
+        return None
+
+    if num_shots == 0:
+        return {}
+
+    gates, measurements = plan
+    system = BatchedQuantumSystem(
+        n_qubits=n_qubits,
+        n_bits=n_bits,
+        batch_size=1,
+        device=device,
+    )
+
+    for gate in gates:
+        _ = system.apply_gate(gate)
+
+    probabilities = torch.abs(system.state_vectors[0]) ** 2
+    probabilities = probabilities / probabilities.sum().clamp_min(1e-12)
+
+    samples = torch.multinomial(probabilities, num_shots, replacement=True).to(dtype=torch.int64)
+
+    register_codes = torch.zeros(num_shots, dtype=torch.int64, device=device)
+    for measurement in measurements:
+        measured_bit = (samples >> (n_qubits - 1 - measurement.qubit)) & 1
+        shift = n_bits - 1 - measurement.bit
+        bit_mask = 1 << shift
+        register_codes = (register_codes & ~bit_mask) | (measured_bit << shift)
+
+    return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
+
+
 def measure_all(qubits: QuantumRegister | list[int] | int) -> Circuit:
     """Measure qubits into sequential classical bits starting at 0.
 
@@ -471,6 +594,16 @@ def run_simulation(
             "mps"  if torch.backends.mps.is_available() else
             "cpu"
         )
+
+    sampled = _run_terminal_measurement_sampling(
+        circuit=circuit,
+        num_shots=num_shots,
+        n_qubits=n_qubits,
+        n_bits=n_bits,
+        device=device,
+    )
+    if sampled is not None:
+        return sampled
 
     batched_system = BatchedQuantumSystem(
         n_qubits=n_qubits,
