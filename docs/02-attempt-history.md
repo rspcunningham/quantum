@@ -22,6 +22,7 @@ This document is the canonical record of what has been tried, what worked, and w
 | 8 | `4e4b2cb` | Terminal-measurement sampling fast path: for circuits without conditionals/non-terminal measurements, evolve once and sample many shots from final distribution. | Expanded suite totals: @1000 `60.33s -> 4.76s` (`12.67x`), @10000 `592.91s -> 5.23s` (`113.35x`). 22/22 runnable cases still PASS. | Worked (major) | `2026-02-10T230611.jsonl` vs `2026-02-10T234124.jsonl` |
 | 9 | `7fbe06b` | On MPS terminal-measurement fast path, sample/count on CPU instead of MPS (`multinomial`/`bincount` offload) to avoid backend sampler overhead and sync stalls. | Expanded suite totals: @1000 `4.76s -> 2.96s` (`1.61x`), @10000 `5.23s -> 3.17s` (`1.65x`). 22/22 runnable cases still PASS. | Worked | `2026-02-10T234124.jsonl` vs `2026-02-10T235128.jsonl` |
 | 10 | `c6d7826` (working tree benchmark state) | Implement H2 dynamic branch engine for conditional/mid-circuit execution with branch splitting/merging and fallback heuristics (enabled by default for dynamic circuits with `n_qubits >= 3`). | Expanded suite totals: @1000 `2.96s -> 2.80s` (`1.06x`), @10000 `3.17s -> 3.00s` (`1.06x`). Compare-vs-Aer (full suite) improved from native/aer ratio `5.79x -> 4.99x` at 1000 shots and `1.47x -> 1.05x` at 10000 shots. | Worked (targeted dynamic gain) | `2026-02-10T235128.jsonl` vs `2026-02-11T010850.jsonl`; `compare-2026-02-11T005222.jsonl` vs `compare-2026-02-11T010956.jsonl` |
+| 11 | `8fe4ed4` (working tree benchmark state) | H2 pass 2: remove dynamic measurement boolean index writes (`index_put_/nonzero`) via mask multiplication and replace `allclose` merge checks with compact state-signature merge bucketing. | Controlled A/B (same commit, full suite, native only, repetitions=3): branch engine enabled vs disabled gave `@1000 3.97s -> 2.68s` (`1.48x`) and `@10000 4.30s -> 2.78s` (`1.55x`). Dynamic-only speedup: `1.69x` (@1000), `1.78x` (@10000). | Worked (major dynamic-path gain) | `compare-2026-02-11T012341.jsonl` vs `compare-2026-02-11T012324.jsonl` |
 
 ## Current Benchmark Scope
 
@@ -69,6 +70,7 @@ What worked:
 4. On MPS, terminal-measurement sampling/counting offload to CPU removed a backend-specific sampler bottleneck and delivered another broad step improvement.
 5. Cache cleanup/memory-transfer cleanup gave smaller but real gains.
 6. Dynamic branch execution improved dominant dynamic cases (especially `adaptive_feedback_5q` and `teleportation`) and narrowed the external full-suite gap to near parity at 10000 shots.
+7. Branch-engine pass-2 (mask multiplication + signature-based merge) removed the remaining dynamic indexing and `allclose` merge bottlenecks and delivered another large dynamic speedup in controlled A/B.
 
 What did not:
 

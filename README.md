@@ -93,44 +93,43 @@ If you are a coding agent working on this project:
 
 ## Performance tracker
 
-Latest optimization session (Apple M1 Max, 32 GB, MPS backend, February 10, 2026):
+Latest full benchmark artifact:
 
-- Baseline (post-H1/H2), commit `3df121d`: total at 1000 shots = `370.99s`
-- Current, commit `0c3186d`: total at 1000 shots = `6.41s`
-- Net improvement: `57.9x` faster at 1000 shots
+- Run: `benchmarks/results/2026-02-11T012820.jsonl`
+- Commit: `8fe4ed4`
+- Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
-| Case | 1000 shots (baseline) | 1000 shots (current) | Speedup |
-|------|------------------------|----------------------|---------|
-| `bell_state` | 1.462s | 0.038s | 38.7x |
-| `simple_grovers` | 3.095s | 0.037s | 84.3x |
-| `real_grovers` | 198.469s | 5.731s | 34.6x |
-| `ghz_state` | 144.913s | 0.175s | 829.0x |
-| `qft` | 20.832s | 0.388s | 53.7x |
-| `teleportation` | 2.221s | 0.043s | 51.8x |
+### Progress (Single Panel)
+
+![Optimization progress (single panel)](benchmarks/results/progress-single-panel-2026-02-11.png)
+
+Progress summary:
+
+| Scope | Baseline | Latest | Speedup |
+|---|---:|---:|---:|
+| Core-6 suite total @1000 (`3df121d` -> latest) | 370.99s | 0.081s | 4574.5x |
+| Expanded suite total @1000 (`2026-02-10T230611` -> latest) | 60.33s | 2.67s | 22.6x |
+| Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.85s | 207.8x |
+
+### Latest SOTA Comparison
+
+Source artifacts:
+
+- Full (`native` vs `aer`): `benchmarks/results/compare-2026-02-11T012858.jsonl`
+- Static intersection (`native` vs `aer` vs `qsim`): `benchmarks/results/compare-2026-02-11T012930.jsonl`
+- Report: `benchmarks/results/compare-2026-02-11T012858.md`
+
+| Scope | Shot count | Native | Aer | qsim | Native vs Aer | Native vs qsim |
+|---|---:|---:|---:|---:|---:|---:|
+| Full suite | 1000 | 2.5505s | 0.6116s | n/a | 4.17x slower | n/a |
+| Full suite | 10000 | 2.6881s | 2.9460s | n/a | 1.10x faster | n/a |
+| Static intersection | 1000 | 0.9772s | 0.2119s | 0.2121s | 4.61x slower | 4.61x slower |
+| Static intersection | 10000 | 0.9614s | 0.2814s | 0.2188s | 3.42x slower | 4.39x slower |
+| Dynamic subset (full) | 1000 | 1.6367s | 0.3979s | n/a | 4.11x slower | n/a |
+| Dynamic subset (full) | 10000 | 1.7734s | 2.6633s | n/a | 1.50x faster | n/a |
 
 Detailed run log and profiler notes: `docs/02-attempt-history.md`.
 Narrative docs index: `docs/README.md`.
-
-Expanded-suite baseline after benchmark broadening (Apple M1 Max, MPS backend):
-- Run: `benchmarks/results/2026-02-10T230611.jsonl`
-- Commit: `e1fa5b0`
-- Total @1000 shots: `60.33s`
-- Total @10000 shots: `592.91s`
-- Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
-
-Latest expanded-suite result after terminal-measurement sampling fast path:
-- Run: `benchmarks/results/2026-02-10T234124.jsonl`
-- Commit: `4e4b2cb`
-- Total @1000 shots: `4.76s` (`12.67x` faster vs expanded baseline)
-- Total @10000 shots: `5.23s` (`113.35x` faster vs expanded baseline)
-- Completed correctness: 22/22 PASS (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
-
-Latest expanded-suite result after MPS terminal-sampler offload:
-- Run: `benchmarks/results/2026-02-10T235128.jsonl`
-- Commit: `7fbe06b`
-- Total @1000 shots: `2.96s` (`20.38x` faster vs expanded baseline, `1.61x` vs post-H0)
-- Total @10000 shots: `3.17s` (`186.74x` faster vs expanded baseline, `1.65x` vs post-H0)
-- Completed correctness: 22/22 PASS (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
 ## Setup
 

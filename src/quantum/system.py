@@ -129,36 +129,25 @@ def _set_classical_bit(value: int, *, bit: int, outcome: int, n_bits: int) -> in
     return (value & ~bit_mask) | (outcome << shift)
 
 
-def _merge_dynamic_branches(
-    branches: list[_DynamicBranchState],
-) -> list[_DynamicBranchState]:
-    """Merge branches that share classical value and numerically identical states."""
-    grouped: dict[int, list[_DynamicBranchState]] = {}
-
-    for branch in branches:
-        if branch.shots <= 0:
-            continue
-
-        bucket = grouped.setdefault(branch.classical_value, [])
-        merged = False
-        for existing in bucket:
-            if torch.allclose(existing.state_vector, branch.state_vector, atol=1e-6, rtol=1e-5):
-                existing.shots += branch.shots
-                merged = True
-                break
-        if not merged:
-            bucket.append(
-                _DynamicBranchState(
-                    state_vector=branch.state_vector,
-                    classical_value=branch.classical_value,
-                    shots=branch.shots,
-                )
-            )
-
-    merged_branches: list[_DynamicBranchState] = []
-    for bucket in grouped.values():
-        merged_branches.extend(bucket)
-    return merged_branches
+def _state_merge_signature(
+    state_vector: torch.Tensor,
+    *,
+    sig_vector_a: torch.Tensor,
+    sig_vector_b: torch.Tensor,
+    scale: int,
+) -> tuple[int, ...]:
+    """Stable compact signature for branch-state merge bucketing."""
+    state = state_vector[0]
+    projections = torch.stack((
+        torch.sum(state * sig_vector_a),
+        torch.sum(state * sig_vector_b),
+        state[0],
+        state[-1],
+    ))
+    values = torch.view_as_real(projections).reshape(-1).to(torch.float32)
+    values_cpu = cast(npt.NDArray[np.float32], values.cpu().numpy())
+    quantized = np.rint(values_cpu * scale).astype(np.int64, copy=False)
+    return tuple(int(v) for v in quantized)
 
 
 def _counts_from_dynamic_branches(
@@ -222,6 +211,13 @@ def _run_dynamic_branch_simulation(
         device=device,
     )
     dim = 1 << n_qubits
+    signature_scale = 10 ** 6
+    indices = torch.arange(dim, device=device, dtype=torch.float32)
+    phase_a = 0.731 * indices + 0.119 * (indices * indices)
+    phase_b = 1.213 * indices + 0.071 * (indices * indices)
+    sig_vector_a = (torch.cos(phase_a) + 1j * torch.sin(phase_a)).to(torch.complex64)
+    sig_vector_b = (torch.cos(phase_b) + 1j * torch.sin(phase_b)).to(torch.complex64)
+
     initial_state = torch.zeros((1, dim), dtype=torch.complex64, device=device)
     initial_state[0, 0] = 1.0
 
@@ -232,6 +228,8 @@ def _run_dynamic_branch_simulation(
             shots=num_shots,
         )
     ]
+
+    measurement_masks: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
     for operation in operations:
         if isinstance(operation, Gate):
@@ -252,10 +250,38 @@ def _run_dynamic_branch_simulation(
 
         # Measurement: split branches by sampled outcomes, then merge compatible branches.
         measurement = operation
-        mask_1 = gate_system._measurement_mask_for_qubit(measurement.qubit)
-        weight_1 = gate_system._measurement_weight_for_qubit(measurement.qubit)
+        mask_entry = measurement_masks.get(measurement.qubit)
+        if mask_entry is None:
+            mask_1 = gate_system._measurement_mask_for_qubit(measurement.qubit)
+            weight_1 = gate_system._measurement_weight_for_qubit(measurement.qubit)
+            keep_0 = (~mask_1).to(torch.complex64).unsqueeze(0)
+            keep_1 = mask_1.to(torch.complex64).unsqueeze(0)
+            measurement_masks[measurement.qubit] = (weight_1, keep_0, keep_1)
+        else:
+            weight_1, keep_0, keep_1 = mask_entry
 
-        next_branches: list[_DynamicBranchState] = []
+        merged_next: dict[tuple[int, tuple[int, ...]], _DynamicBranchState] = {}
+
+        def _add_merged_branch(*, child_state: torch.Tensor, child_classical: int, child_shots: int) -> None:
+            if child_shots <= 0:
+                return
+            signature = _state_merge_signature(
+                child_state,
+                sig_vector_a=sig_vector_a,
+                sig_vector_b=sig_vector_b,
+                scale=signature_scale,
+            )
+            key = (child_classical, signature)
+            existing = merged_next.get(key)
+            if existing is None:
+                merged_next[key] = _DynamicBranchState(
+                    state_vector=child_state,
+                    classical_value=child_classical,
+                    shots=child_shots,
+                )
+            else:
+                existing.shots += child_shots
+
         for branch in branches:
             shots = branch.shots
             if shots <= 0:
@@ -270,42 +296,36 @@ def _run_dynamic_branch_simulation(
             shots_0 = shots - shots_1
 
             if shots_0 > 0:
-                state_0 = branch.state_vector.clone()
-                state_0[:, mask_1] = 0
+                state_0 = branch.state_vector * keep_0
                 norm_0 = torch.sqrt((torch.abs(state_0) ** 2).sum()).clamp_min(1e-12)
                 state_0 = state_0 / norm_0
-                next_branches.append(
-                    _DynamicBranchState(
-                        state_vector=state_0,
-                        classical_value=_set_classical_bit(
-                            branch.classical_value,
-                            bit=measurement.bit,
-                            outcome=0,
-                            n_bits=n_bits,
-                        ),
-                        shots=shots_0,
-                    )
+                _add_merged_branch(
+                    child_state=state_0,
+                    child_classical=_set_classical_bit(
+                        branch.classical_value,
+                        bit=measurement.bit,
+                        outcome=0,
+                        n_bits=n_bits,
+                    ),
+                    child_shots=shots_0,
                 )
 
             if shots_1 > 0:
-                state_1 = branch.state_vector.clone()
-                state_1[:, ~mask_1] = 0
+                state_1 = branch.state_vector * keep_1
                 norm_1 = torch.sqrt((torch.abs(state_1) ** 2).sum()).clamp_min(1e-12)
                 state_1 = state_1 / norm_1
-                next_branches.append(
-                    _DynamicBranchState(
-                        state_vector=state_1,
-                        classical_value=_set_classical_bit(
-                            branch.classical_value,
-                            bit=measurement.bit,
-                            outcome=1,
-                            n_bits=n_bits,
-                        ),
-                        shots=shots_1,
-                    )
+                _add_merged_branch(
+                    child_state=state_1,
+                    child_classical=_set_classical_bit(
+                        branch.classical_value,
+                        bit=measurement.bit,
+                        outcome=1,
+                        n_bits=n_bits,
+                    ),
+                    child_shots=shots_1,
                 )
 
-        branches = _merge_dynamic_branches(next_branches)
+        branches = list(merged_next.values())
         if len(branches) > branch_cap:
             # Conservative fallback for branch explosion.
             return None
