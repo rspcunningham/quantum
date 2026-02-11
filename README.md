@@ -118,6 +118,13 @@ Expanded-suite baseline after benchmark broadening (Apple M1 Max, MPS backend):
 - Total @10000 shots: `592.91s`
 - Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
+Latest expanded-suite result after terminal-measurement sampling fast path:
+- Run: `benchmarks/results/2026-02-10T234124.jsonl`
+- Commit: `4e4b2cb`
+- Total @1000 shots: `4.76s` (`12.67x` faster vs expanded baseline)
+- Total @10000 shots: `5.23s` (`113.35x` faster vs expanded baseline)
+- Completed correctness: 22/22 PASS (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
+
 ## Setup
 
 ```bash

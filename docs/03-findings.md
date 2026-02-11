@@ -12,7 +12,8 @@ For state-vector simulation, most nontrivial gates fundamentally require touchin
 Practical consequence:
 
 - Large wins come from eliminating accidental `O(4^n)` work and avoiding unnecessary full-state passes.
-- After asymptotics are fixed, memory movement and dispatch overhead dominate.
+- For static (terminal-measurement) circuits, shot count should not scale unitary evolution cost.
+- After asymptotics and shot-scaling mismatches are fixed, memory movement, indexing, and dispatch overhead dominate.
 
 ## What Worked
 
@@ -48,6 +49,15 @@ Why it worked:
 
 - Reduced repeated device transfer and setup overhead.
 
+### 5. Terminal-measurement sampling fast path
+
+For circuits without conditionals and without non-terminal measurements, evolving once and sampling many shots from the final distribution produced a major broad win.
+
+Why it worked:
+
+- Removed unnecessary `O(num_shots * gates * 2^n)` replay in static circuits.
+- Restored first-principles shot behavior: one unitary evolution plus independent sampling.
+
 ## What Did Not Work
 
 ### Local-axis permutation `index_select` path on MPS
@@ -72,13 +82,15 @@ Conclusion:
 
 Current traces indicate:
 
-- `aten::copy_` / `aten::to` dominate in heavy cases.
-- `aten::mm` is no longer the primary bottleneck after structural optimizations.
+- Pre-H0 heavy static cases were dominated by `aten::copy_` / `aten::to`.
+- Post-H0, dominant costs are now concentrated in:
+  - one-shot unitary evolution overhead for deep/high-qubit cases
+  - dynamic-feedback indexing/scalar-sync paths (`nonzero` / `index` / `item`)
 
 This shifts optimization focus to:
 
-1. reduce number of full-state passes
-2. reduce copy/sync points
+1. reduce one-shot unitary overhead (fewer passes, fewer expensive index-map builds)
+2. reduce dynamic conditional/indexing overhead
 3. reduce runtime dispatch overhead with compiled execution plans
 
 ## Benchmark Strategy Finding
@@ -97,5 +109,5 @@ Most promising next directions:
 
 1. execution-plan compilation (segment + precompute)
 2. gate fusion inside unitary segments
-3. copy/sync minimization in measurement/result paths
+3. dynamic conditional path optimization
 4. MPS rank-limit-safe execution for higher-qubit coverage

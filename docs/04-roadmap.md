@@ -22,6 +22,7 @@ Implemented and validated:
 3. Gate tensor and measurement-weight caching.
 4. Diagonal gate metadata + diagonal fast path.
 5. Monomial/permutation metadata + permutation fast path.
+6. Terminal-measurement sampling fast path (single-shot evolution + multi-shot sampling for eligible static circuits).
 
 Attempted and rejected:
 
@@ -30,38 +31,28 @@ Reason: significant regressions on MPS; reverted.
 
 ## Current Bottleneck View
 
-From `benchmarks/results/2026-02-10T230611.jsonl`:
+From `benchmarks/results/2026-02-10T234124.jsonl`:
 
-- Total @10000 is `592.91s`.
-- Top 2 cases contribute `58.16%`.
-- Top 5 cases contribute `80.30%`.
-- 18/22 passing cases are unitary-until-terminal-measurement and contribute `590.55s` (`99.6%`) of @10000 runtime.
+- Total @1000 is `4.76s` (from `60.33s`, `12.67x` faster).
+- Total @10000 is `5.23s` (from `592.91s`, `113.35x` faster).
+- 22/22 runnable cases remain correct (same known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`).
 
-From targeted profiler traces:
+Post-H0 time concentration at 10000 shots:
 
-- Heavy unitary cases are dominated by copy/transfer attribution (`aten::copy_`, `aten::to`) rather than math (`aten::mm`).
-- Dynamic-feedback cases are dominated by boolean indexing and scalar sync (`aten::nonzero`, `aten::index`, `aten::item` / `_local_scalar_dense`).
+- `reversible_mix_15`: `1.45s` (`27.8%`)
+- `adaptive_feedback_5q`: `1.26s` (`24.0%`)
+- `adaptive_feedback_120`: `0.87s` (`16.7%`)
+- `adaptive_feedback`: `0.32s` (`6.1%`)
 
 Implications:
 
-- The biggest remaining win is algorithmic: avoid scaling unitary evolution with shot count when measurements are terminal.
-- The next tier is reducing full-state copy/layout churn and runtime dispatch overhead.
-- Dynamic-circuit performance requires dedicated conditional/branch handling, but this is currently a much smaller share of total suite time.
+- Shot-scaled static replay is no longer the dominant issue.
+- Remaining hotspots are:
+  - one-shot heavy unitary execution overhead (notably deep 15-qubit reversible mix)
+  - dynamic-feedback conditional/indexing overhead
+  - persistent backend rank-limit coverage gap
 
 ## Next Hypotheses (Not Implemented Yet)
-
-### H0. Terminal-Measurement Sampling Fast Path (Highest Priority)
-
-For circuits with:
-
-- no conditional gates, and
-- no non-terminal measurements
-
-execute the unitary portion once (single state vector), then sample outcomes for `num_shots` from the final probability distribution.
-
-Implementation design: `docs/07-design-h0-terminal-sampling.md`.
-
-Expected impact: very high, broad, and principled. Removes unnecessary `O(num_shots * gates * 2^n)` evolution for static circuits.
 
 ### H1. Execution-Plan Compilation (Circuit IR)
 
@@ -71,7 +62,7 @@ Compile a circuit into reusable execution segments and artifacts:
 - precompute operation metadata, device tensors, index maps, and dispatch kernel choice
 - reduce runtime Python branching and repeated cache lookups
 
-Expected impact: broad, moderate improvement across deep circuits.
+Expected impact: broad, moderate-to-high improvement, especially for deep one-shot unitary cases where index-map/setup overhead is now visible.
 
 ### H2. Gate Fusion Within Unitary Segments
 
@@ -92,7 +83,7 @@ Reduce full-state layout thrash in dense/permutation application:
 - investigate lazy logical-to-physical qubit layout tracking
 - reduce repeated full-state gathers where a cheaper formulation exists on MPS
 
-Expected impact: moderate-to-high on dense-heavy workloads.
+Expected impact: moderate on remaining dense/permutation-heavy one-shot hotspots.
 
 ### H4. Dynamic-Circuit Conditional Path Rewrite
 
@@ -102,7 +93,7 @@ Target adaptive-feedback bottlenecks:
 - avoid expensive boolean advanced indexing restore patterns
 - investigate branch-group/shot-branching style execution for repeated feedback loops
 
-Expected impact: moderate on feedback workloads; lower aggregate impact on current suite totals.
+Expected impact: moderate-to-high on feedback workloads, which are now a large share of post-H0 totals.
 
 ### H5. Address MPS Rank-Limit Failure Path
 
