@@ -65,6 +65,7 @@ class BatchedQuantumSystem:
     batch_size: int
     device: torch.device
     _measurement_masks: dict[int, torch.Tensor]
+    _measurement_weights: dict[int, torch.Tensor]
     _gate_tensors: dict[int, torch.Tensor]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
@@ -73,6 +74,7 @@ class BatchedQuantumSystem:
         self.batch_size = batch_size
         self.device = device
         self._measurement_masks = {}
+        self._measurement_weights = {}
         self._gate_tensors = {}
 
         # Initialize all state vectors to |000...0⟩
@@ -134,7 +136,7 @@ class BatchedQuantumSystem:
         mask_1 = self._measurement_mask_for_qubit(qubit)
 
         probs = torch.abs(self.state_vectors) ** 2  # (batch_size, 2^n)
-        p1 = probs[:, mask_1].sum(dim=1).clamp(0.0, 1.0)  # (batch_size,)
+        p1 = (probs @ self._measurement_weight_for_qubit(qubit)).clamp(0.0, 1.0)  # (batch_size,)
 
         # Sample outcomes for all batches at once
         outcomes = (torch.rand(self.batch_size, device=self.device) < p1).to(torch.int32)  # (batch_size,)
@@ -163,6 +165,16 @@ class BatchedQuantumSystem:
         mask = ((indices >> bitpos) & 1).bool()
         self._measurement_masks[qubit] = mask
         return mask
+
+    def _measurement_weight_for_qubit(self, qubit: int) -> torch.Tensor:
+        """Float mask for fast p(|1>) computation via matmul."""
+        weight = self._measurement_weights.get(qubit)
+        if weight is not None:
+            return weight
+
+        weight = self._measurement_mask_for_qubit(qubit).to(torch.float32)
+        self._measurement_weights[qubit] = weight
+        return weight
 
     def _device_gate_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """Cache gate tensors on the active device to avoid per-op transfers."""
