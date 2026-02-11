@@ -101,7 +101,7 @@ Latest full benchmark artifact:
 
 ### Progress (Single Panel)
 
-![Optimization progress (single panel)](benchmarks/results/progress-single-panel-2026-02-11.png)
+![Optimization progress (single panel)](docs/images/optimization-progress-core6-single-panel.png)
 
 Progress summary:
 
