@@ -191,13 +191,6 @@ def _run_dynamic_branch_simulation(
         return {}
 
     try:
-        min_qubits_for_branch = int(os.environ.get("QUANTUM_DYNAMIC_BRANCH_MIN_QUBITS", "3"))
-    except ValueError:
-        min_qubits_for_branch = 3
-    if n_qubits < min_qubits_for_branch:
-        return None
-
-    try:
         branch_cap = int(os.environ.get("QUANTUM_DYNAMIC_BRANCH_CAP", "4096"))
     except ValueError:
         branch_cap = 4096

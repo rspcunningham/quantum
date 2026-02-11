@@ -23,6 +23,9 @@ This document is the canonical record of what has been tried, what worked, and w
 | 9 | `7fbe06b` | On MPS terminal-measurement fast path, sample/count on CPU instead of MPS (`multinomial`/`bincount` offload) to avoid backend sampler overhead and sync stalls. | Expanded suite totals: @1000 `4.76s -> 2.96s` (`1.61x`), @10000 `5.23s -> 3.17s` (`1.65x`). 22/22 runnable cases still PASS. | Worked | `2026-02-10T234124.jsonl` vs `2026-02-10T235128.jsonl` |
 | 10 | `c6d7826` (working tree benchmark state) | Implement H2 dynamic branch engine for conditional/mid-circuit execution with branch splitting/merging and fallback heuristics (enabled by default for dynamic circuits with `n_qubits >= 3`). | Expanded suite totals: @1000 `2.96s -> 2.80s` (`1.06x`), @10000 `3.17s -> 3.00s` (`1.06x`). Compare-vs-Aer (full suite) improved from native/aer ratio `5.79x -> 4.99x` at 1000 shots and `1.47x -> 1.05x` at 10000 shots. | Worked (targeted dynamic gain) | `2026-02-10T235128.jsonl` vs `2026-02-11T010850.jsonl`; `compare-2026-02-11T005222.jsonl` vs `compare-2026-02-11T010956.jsonl` |
 | 11 | `8fe4ed4` (working tree benchmark state) | H2 pass 2: remove dynamic measurement boolean index writes (`index_put_/nonzero`) via mask multiplication and replace `allclose` merge checks with compact state-signature merge bucketing. | Controlled A/B (same commit, full suite, native only, repetitions=3): branch engine enabled vs disabled gave `@1000 3.97s -> 2.68s` (`1.48x`) and `@10000 4.30s -> 2.78s` (`1.55x`). Dynamic-only speedup: `1.69x` (@1000), `1.78x` (@10000). | Worked (major dynamic-path gain) | `compare-2026-02-11T012341.jsonl` vs `compare-2026-02-11T012324.jsonl` |
+| 12 | `d310883` (working tree benchmark state) | Replace hard branch-engine gate (`n_qubits >= 3`) with workload-aware dispatch: use branch mode for low-qubit circuits when dynamic op count is high (env-tunable thresholds). | Controlled A/B (same commit, full suite, native only): low-qubit branch dispatch enabled vs disabled gave `@1000 2.00s -> 1.82s` (`1.10x`) and `@10000 2.13s -> 1.83s` (`1.16x`). Dynamic-only speedup: `1.17x` (@1000), `1.29x` (@10000). | Worked (general dynamic dispatch gain) | `2026-02-11T014954.jsonl` vs `2026-02-11T014743.jsonl`; profiler: `trace_adaptive_feedback_120_10000_current.json` vs `trace_adaptive_feedback_120_10000_h3_default.json` |
+| 13 | `d310883` (working tree benchmark state) | Remove dynamic dispatch heuristics and always route dynamic circuits through the branch engine. | Simplified policy; on the current benchmark suite, this is behavior-equivalent because all dynamic cases already satisfied the prior routing rule (`n_qubits >= 3` or `dynamic_ops >= 128`). | Worked (simplification, neutral expected impact) | Dynamic-case op audit from `2026-02-11T020119.jsonl` confirms all current dynamic cases would branch under old and new policy. |
+| 14 | Uncommitted analysis experiment | Force static circuits through branch engine (disable terminal-sampling fast path + force dynamic plan) to test unified-engine viability. | Regressed: across 18 static cases at 10000 shots, median total `0.9727s -> 1.4996s` (`1.54x` slower). Worst slowdowns include `ghz_state` (`3.14x`) and `simple_grovers` (`2.51x`). | Did not work | Direct monkeypatch timing experiment (shots=10000, reps=2) run on current tree. |
 
 ## Current Benchmark Scope
 
@@ -42,18 +45,18 @@ Always-on suite now includes:
 
 ## Latest Baseline (Expanded Suite)
 
-Run: `benchmarks/results/2026-02-11T010850.jsonl`
+Run: `benchmarks/results/2026-02-11T014743.jsonl`
 
 - Completed cases: 22
 - Correctness: 22/22 PASS
-- Total @1000: `2.80s`
-- Total @10000: `3.00s`
+- Total @1000: `1.82s`
+- Total @10000: `1.83s`
 - Speedup vs expanded-suite baseline (`2026-02-10T230611.jsonl`):
-  - @1000: `21.55x`
-  - @10000: `197.64x`
+  - @1000: `33.09x`
+  - @10000: `323.20x`
 - Speedup vs post-H0.1 baseline (`2026-02-10T235128.jsonl`):
-  - @1000: `1.06x`
-  - @10000: `1.06x`
+  - @1000: `1.62x`
+  - @10000: `1.73x`
 
 Known backend-limit failures (not OOM):
 
@@ -71,10 +74,13 @@ What worked:
 5. Cache cleanup/memory-transfer cleanup gave smaller but real gains.
 6. Dynamic branch execution improved dominant dynamic cases (especially `adaptive_feedback_5q` and `teleportation`) and narrowed the external full-suite gap to near parity at 10000 shots.
 7. Branch-engine pass-2 (mask multiplication + signature-based merge) removed the remaining dynamic indexing and `allclose` merge bottlenecks and delivered another large dynamic speedup in controlled A/B.
+8. Workload-aware dynamic dispatch (op-count-based threshold) preserved the general branch-engine strategy while unlocking additional speedups on high-feedback low-qubit circuits without hard-coding benchmark case IDs.
+9. Always routing dynamic circuits to the branch engine simplifies policy and avoids overfitting dispatch knobs; on current cases, it is behavior-equivalent to the previous thresholded routing.
 
 What did not:
 
 1. Local-axis permutation `index_select` looked promising conceptually but regressed on MPS in practice and was reverted.
+2. Forcing static circuits through the branch engine (instead of terminal-measurement sampling fast path) regressed materially (`~1.54x` slower aggregate in static-case experiment).
 
 What changed strategically:
 
