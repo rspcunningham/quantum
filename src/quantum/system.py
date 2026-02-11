@@ -65,6 +65,7 @@ class BatchedQuantumSystem:
     batch_size: int
     device: torch.device
     _measurement_masks: dict[int, torch.Tensor]
+    _gate_tensors: dict[int, torch.Tensor]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
@@ -72,6 +73,7 @@ class BatchedQuantumSystem:
         self.batch_size = batch_size
         self.device = device
         self._measurement_masks = {}
+        self._gate_tensors = {}
 
         # Initialize all state vectors to |000...0⟩
         # Shape: (batch_size, 2^n_qubits) - each row is a state vector
@@ -92,7 +94,7 @@ class BatchedQuantumSystem:
         O(2^n) per gate instead of O(4^n).
         """
         targets = gate.targets
-        tensor = gate.tensor.to(self.device)
+        tensor = self._device_gate_tensor(gate.tensor)
         k = len(targets)
         n = self.n_qubits
 
@@ -161,6 +163,21 @@ class BatchedQuantumSystem:
         mask = ((indices >> bitpos) & 1).bool()
         self._measurement_masks[qubit] = mask
         return mask
+
+    def _device_gate_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Cache gate tensors on the active device to avoid per-op transfers."""
+        key = id(tensor)
+        cached = self._gate_tensors.get(key)
+        if cached is not None:
+            return cached
+
+        if tensor.device == self.device:
+            self._gate_tensors[key] = tensor
+            return tensor
+
+        moved = tensor.to(self.device)
+        self._gate_tensors[key] = moved
+        return moved
 
     @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "BatchedQuantumSystem":
