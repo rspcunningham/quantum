@@ -56,8 +56,18 @@ Each benchmark case defines a circuit and its theoretical output distribution. T
 | `phase_ladder_13` | 13 | Larger diagonal-gate stress |
 | `toffoli_oracle_13` | 13 | Larger Toffoli-heavy oracle round-trip |
 | `adaptive_feedback_120` | 2 | Long repeated measurement/conditional feedback |
+| `reversible_mix_13` | 13 | Random reversible logic mix (X/CX/CCX round-trip) |
+| `reversible_mix_15` | 15 | Larger reversible logic stress near backend limits |
+| `clifford_scrambler_14` | 14 | Random Clifford scrambling + inverse |
+| `brickwork_entangler_15` | 15 | Nearest-neighbor brickwork entangling pattern |
+| `random_universal_12` | 12 | Random universal circuit (RX/RY/RZ/CX/CCX) round-trip |
+| `random_universal_14` | 14 | Larger random universal round-trip |
+| `diagonal_mesh_15` | 15 | Random long-range diagonal phase mesh round-trip |
+| `adaptive_feedback_5q` | 5 | Mid-circuit feedback stress on larger state vectors |
 
 Cases live in `benchmarks/cases/`.
+
+Expanded synthetic families (randomized but reproducible with fixed seeds) are intentionally included in the default suite to broaden structural coverage across reversible logic, Clifford scrambling, universal gate mixes, diagonal phase meshes, and larger dynamic-feedback workloads.
 
 ## Optimization workflow
 
@@ -99,6 +109,13 @@ Latest optimization session (Apple M1 Max, 32 GB, MPS backend, February 10, 2026
 | `teleportation` | 2.221s | 0.043s | 51.8x |
 
 Detailed run log and profiler notes: `docs/optimization-progress-2026-02-10.md`.
+
+Expanded-suite baseline after benchmark broadening (Apple M1 Max, MPS backend):
+- Run: `benchmarks/results/2026-02-10T230611.jsonl`
+- Commit: `e1fa5b0`
+- Total @1000 shots: `60.33s`
+- Total @10000 shots: `592.91s`
+- Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
 ## Setup
 

@@ -34,6 +34,16 @@ from benchmarks.cases.extended_sweeps import (
     toffoli_oracle_13,
     adaptive_feedback_120,
 )
+from benchmarks.cases.synthetic_expanded import (
+    reversible_mix_13,
+    reversible_mix_15,
+    clifford_scrambler_14,
+    brickwork_entangler_15,
+    random_universal_12,
+    random_universal_14,
+    diagonal_mesh_15,
+    adaptive_feedback_5q,
+)
 
 ALL_CASES: list[Callable[[], BenchmarkCase]] = [
     bell_state,
@@ -52,4 +62,12 @@ ALL_CASES: list[Callable[[], BenchmarkCase]] = [
     phase_ladder_13,
     toffoli_oracle_13,
     adaptive_feedback_120,
+    reversible_mix_13,
+    reversible_mix_15,
+    clifford_scrambler_14,
+    brickwork_entangler_15,
+    random_universal_12,
+    random_universal_14,
+    diagonal_mesh_15,
+    adaptive_feedback_5q,
 ]

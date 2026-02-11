@@ -52,3 +52,33 @@ Key observations after the latest changes:
 1. Reduce host-device synchronization and copy overhead in measurement/result extraction.
 2. Specialize diagonal gates (`Z`, `S`, `T`, `RZ`, controlled phase) as elementwise multiplies.
 3. Evaluate selective conditional gate application strategy to avoid clone/restore overhead.
+
+## Benchmark Expansion (2026-02-11)
+
+The benchmark suite was expanded from 16 to 24 configured cases (22 currently runnable on MPS due to existing rank-limit failures in `ghz_state_16` and `ghz_state_18`).
+
+Added always-on synthetic families:
+- `reversible_mix_13`
+- `reversible_mix_15`
+- `clifford_scrambler_14`
+- `brickwork_entangler_15`
+- `random_universal_12`
+- `random_universal_14`
+- `diagonal_mesh_15`
+- `adaptive_feedback_5q`
+
+All synthetic cases are deterministic round-trips (`U` then `U^-1`) with expected output `|0...0>` to preserve strict correctness checks while broadening structural coverage.
+
+Expanded-suite baseline run:
+- Run timestamp: `2026-02-10T230611.jsonl`
+- Commit: `e1fa5b0`
+- Total @1000 shots: `60.33s`
+- Total @10000 shots: `592.91s`
+- Correctness: PASS on all 22 completed cases
+- Known backend limits: `ghz_state_16`, `ghz_state_18` still fail on MPS tensor-dimension limit (`<=16`)
+
+Largest added-case costs @10000 shots:
+- `random_universal_14`: `186.21s`
+- `brickwork_entangler_15`: `158.61s`
+- `clifford_scrambler_14`: `63.00s`
+- `random_universal_12`: `31.39s`
