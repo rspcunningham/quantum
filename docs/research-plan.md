@@ -1,5 +1,18 @@
 # Research Plan
 
+## Status Update (2026-02-10)
+
+- ✅ **H1/H2 completed**: tensor-contraction gate path landed (commit `86fb8c5`).
+- ✅ **H3 completed**: measurement collapse vectorized in batched path (commit `587a03f`), with follow-up improvements in commits `eb476df` and `0c3186d`.
+- ⏳ **H4 pending**: batched gate path no longer renormalizes per gate; single-shot `QuantumSystem` still does.
+- ⏳ **H5 ongoing**: MPS dispatch/sync overhead remains visible after core algorithmic fixes.
+
+Current measured status (M1 Max, MPS):
+- Baseline after H1/H2 (`3df121d`): total 1000-shot benchmark `370.99s`
+- Current (`0c3186d`): total 1000-shot benchmark `6.41s` (`57.9x` faster)
+
+Detailed run-by-run numbers: `docs/optimization-progress-2026-02-10.md`
+
 ## H1: Full matrix construction dominates — the GPU is mostly idle
 
 The current code builds a complete 2^n × 2^n matrix for every gate, even single-qubit gates. For 13 qubits, applying a 2×2 Hadamard gate means:

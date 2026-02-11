@@ -4,6 +4,25 @@ Compiled during baseline profiling run.
 
 ---
 
+## Update: Implemented Results (2026-02-10)
+
+The highest-priority recommendations in this document have now been implemented and benchmarked:
+
+1. Tensor contraction gate application (H1/H2) — already landed before this session.
+2. Vectorized measurement collapse (H3) — implemented in `BatchedQuantumSystem`.
+3. Gate tensor device cache — avoids repeated `tensor.to(device)` in hot path.
+4. Cached measurement probability weights — replaces boolean-index sum with matmul.
+
+Measured impact on full benchmark suite (`1000` shots, M1 Max, MPS):
+- Baseline (commit `3df121d`): `370.99s`
+- Current (commit `0c3186d`): `6.41s`
+- Net: `57.9x` faster with correctness checks still passing.
+
+Detailed timing tables and profiler snapshots are tracked in:
+`docs/optimization-progress-2026-02-10.md`
+
+---
+
 ## 1. Tensor Contraction (replaces Kronecker products + swap matrices)
 
 **The core problem:** Our simulator builds a full `2^n x 2^n` matrix for every gate via `torch.kron`, then applies it with dense matmul. For 13 qubits that's 8192x8192 per gate — O(4^n) when it should be O(2^n).

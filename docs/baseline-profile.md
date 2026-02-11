@@ -1,5 +1,8 @@
 # Baseline Profiler Analysis
 
+Historical note: this document captures the pre-tensor-contraction baseline.
+For the latest post-optimization results, see `docs/optimization-progress-2026-02-10.md`.
+
 Profiled with `torch.profiler` on Apple M1 Max, MPS backend, PyTorch 2.9.0.
 
 Trace file: `profile_simple_grovers_1.json` — 5 qubits, 64 ops, 1 shot.

@@ -33,7 +33,7 @@ uv run bench -v       # verbose: per-case timing + correctness details
 uv run bench-plot     # plot the most recent results
 ```
 
-Each benchmark case defines a circuit and its theoretical output distribution. The harness runs every case at 1, 10, 100, and 1000 shots, timing each. Correctness is verified at 1000 shots by comparing the observed distribution against the expected one within a tolerance. Results are JSONL in `benchmarks/results/`.
+Each benchmark case defines a circuit and its theoretical output distribution. The harness runs every case at 1, 10, 100, and 1000 shots, timing each. Correctness is verified at 1000 shots by comparing the observed distribution against the expected one within a tolerance. Results are written locally to `benchmarks/results/` (gitignored).
 
 ### Cases
 
@@ -72,7 +72,22 @@ If you are a coding agent working on this project:
 
 ## Performance tracker
 
-Experimental results on Apple M1 Max, 32 GB, MPS backend coming soon.
+Latest optimization session (Apple M1 Max, 32 GB, MPS backend, February 10, 2026):
+
+- Baseline (post-H1/H2), commit `3df121d`: total at 1000 shots = `370.99s`
+- Current, commit `0c3186d`: total at 1000 shots = `6.41s`
+- Net improvement: `57.9x` faster at 1000 shots
+
+| Case | 1000 shots (baseline) | 1000 shots (current) | Speedup |
+|------|------------------------|----------------------|---------|
+| `bell_state` | 1.462s | 0.038s | 38.7x |
+| `simple_grovers` | 3.095s | 0.037s | 84.3x |
+| `real_grovers` | 198.469s | 5.731s | 34.6x |
+| `ghz_state` | 144.913s | 0.175s | 829.0x |
+| `qft` | 20.832s | 0.388s | 53.7x |
+| `teleportation` | 2.221s | 0.043s | 51.8x |
+
+Detailed run log and profiler notes: `docs/optimization-progress-2026-02-10.md`.
 
 ## Setup
 
