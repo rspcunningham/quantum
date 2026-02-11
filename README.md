@@ -30,10 +30,12 @@ Big-endian qubit ordering (qubit 0 is the leftmost bit). Supports CUDA, MPS, and
 ```bash
 uv run bench          # run all cases, print totals
 uv run bench -v       # verbose: per-case timing + correctness details
+uv run bench --stress # include 10,000-shot stress point
+uv run bench --shots 1,10,1000,10000 --cases real_grovers qft
 uv run bench-plot     # plot the most recent results
 ```
 
-Each benchmark case defines a circuit and its theoretical output distribution. The harness runs every case at 1, 10, 100, and 1000 shots, timing each. Correctness is verified at 1000 shots by comparing the observed distribution against the expected one within a tolerance. Results are written locally to `benchmarks/results/` (gitignored).
+Each benchmark case defines a circuit and its theoretical output distribution. By default, the harness runs every case at 1, 10, 100, and 1000 shots. The shot schedule is configurable (`--shots`) and stress mode adds a 10,000-shot point (`--stress`). Correctness is verified at the highest configured shot count by comparing the observed distribution against the expected one within a tolerance. Results are written locally to `benchmarks/results/` (gitignored).
 
 ### Cases
 
@@ -45,6 +47,9 @@ Each benchmark case defines a circuit and its theoretical output distribution. T
 | `ghz_state` | 12 | Qubit scaling with shallow circuit (H + CX chain) |
 | `qft` | 10 | Parametric controlled phase gates (QFT round-trip) |
 | `teleportation` | 3 | Mid-circuit measurement and conditional gates |
+| `phase_ladder` | 11 | Deep diagonal-gate stress (RZ + controlled phase round-trip) |
+| `toffoli_oracle` | 11 | Toffoli-heavy nonlinear oracle round-trip |
+| `adaptive_feedback` | 2 | Repeated mid-circuit measurement and conditional feedback |
 
 Cases live in `benchmarks/cases/`, one file each.
 

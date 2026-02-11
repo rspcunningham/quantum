@@ -22,6 +22,9 @@ from benchmarks.cases.real_grovers import real_grovers
 from benchmarks.cases.ghz_state import ghz_state
 from benchmarks.cases.qft import qft
 from benchmarks.cases.teleportation import teleportation
+from benchmarks.cases.phase_ladder import phase_ladder
+from benchmarks.cases.toffoli_oracle import toffoli_oracle
+from benchmarks.cases.adaptive_feedback import adaptive_feedback
 
 ALL_CASES: list[Callable[[], BenchmarkCase]] = [
     bell_state,
@@ -30,4 +33,7 @@ ALL_CASES: list[Callable[[], BenchmarkCase]] = [
     ghz_state,
     qft,
     teleportation,
+    phase_ladder,
+    toffoli_oracle,
+    adaptive_feedback,
 ]

@@ -2,15 +2,13 @@
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
-
-
-SHOT_COUNTS = [1, 10, 100, 1000]
 
 # Consistent colors per case across all plots
 CASE_COLORS = {
@@ -20,6 +18,9 @@ CASE_COLORS = {
     "ghz_state": "#2ca02c",
     "qft": "#9467bd",
     "teleportation": "#8c564b",
+    "phase_ladder": "#e377c2",
+    "toffoli_oracle": "#bcbd22",
+    "adaptive_feedback": "#17becf",
 }
 
 
@@ -42,18 +43,30 @@ def load_all_runs(results_dir: Path) -> list[tuple[str, list[dict]]]:
 
 def plot_over_time(runs: list[tuple[str, list[dict]]], output_path: Path) -> None:
     """Plot performance trends across all runs."""
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    shot_counts = sorted({
+        int(shot)
+        for _, results in runs
+        for r in results
+        for shot in r["times_s"].keys()
+    })
+    if not shot_counts:
+        raise ValueError("No shot counts found in benchmark results.")
 
-    for ax_idx, shots in enumerate(SHOT_COUNTS):
-        ax = axes[ax_idx // 2][ax_idx % 2]
+    all_cases: list[str] = []
+    for _, results in runs:
+        for r in results:
+            if r["case"] not in all_cases:
+                all_cases.append(r["case"])
+
+    n_plots = len(shot_counts)
+    n_cols = min(3, n_plots)
+    n_rows = math.ceil(n_plots / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.5 * n_rows))
+    axes_flat = np.atleast_1d(axes).flatten()
+
+    for ax_idx, shots in enumerate(shot_counts):
+        ax = axes_flat[ax_idx]
         shot_key = str(shots)
-
-        # Collect all case names across all runs
-        all_cases: list[str] = []
-        for _, results in runs:
-            for r in results:
-                if r["case"] not in all_cases:
-                    all_cases.append(r["case"])
 
         # Plot each case as a line over time
         for case_name in all_cases:
@@ -88,12 +101,27 @@ def plot_over_time(runs: list[tuple[str, list[dict]]], output_path: Path) -> Non
         ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f"{y:.3g}"))
         ax.grid(True, alpha=0.3)
 
-    # Single legend for all subplots
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(all_cases), fontsize=9,
-               bbox_to_anchor=(0.5, 1.0))
+    # Hide any unused subplot axes.
+    for ax in axes_flat[n_plots:]:
+        ax.set_visible(False)
 
-    fig.suptitle("Benchmark Performance Over Time", fontsize=14, y=1.03)
+    # Single legend for all subplots
+    handles_map: dict[str, object] = {}
+    for ax in axes_flat[:n_plots]:
+        handles, labels = ax.get_legend_handles_labels()
+        for handle, label in zip(handles, labels):
+            if label not in handles_map:
+                handles_map[label] = handle
+    fig.legend(
+        list(handles_map.values()),
+        list(handles_map.keys()),
+        loc="upper center",
+        ncol=min(len(handles_map), 6),
+        fontsize=9,
+        bbox_to_anchor=(0.5, 1.01),
+    )
+
+    fig.suptitle("Benchmark Performance Over Time", fontsize=14, y=1.02)
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"Saved {output_path}")
