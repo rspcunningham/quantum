@@ -8,8 +8,8 @@ This is a **general-purpose quantum simulator**. The benchmark suite exists to q
 
 ## Scope
 
-- **Optimization target**: `src/quantum/system.py` only. Do not modify `gates.py` or benchmark cases.
-- **Code quality**: Keep `system.py` clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases.
+- **Optimization targets**: `src/quantum/system.py` and `src/quantum/gates.py`. Do not modify benchmark cases or the user-facing API (gate constructors, `run_simulation` signature, `Circuit`/`QuantumRegister` interface).
+- **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases.
 - **Backend**: Apple Silicon MPS via PyTorch. This runs on a MacBook — MPS is the primary target, not CUDA.
 
 ## The loop
@@ -60,9 +60,50 @@ Before writing any code, state:
 Bad hypothesis: "Make `adaptive_feedback_5q` faster by caching its specific branch pattern."
 Good hypothesis: "Replacing per-measurement `nonzero` calls with multiplicative masking should reduce dynamic-circuit overhead across all feedback workloads, because profiler shows `nonzero` at 73% of CPU time in the dynamic path."
 
+### 2b. Research
+
+Before implementing, use external sources to inform your approach. The goal is not just to match SOTA but to surpass it — look for techniques that haven't been tried yet.
+
+**DeepWiki** — query open-source codebases for design patterns and implementation details:
+
+```
+# How does the SOTA target implement something?
+deepwiki ask Qiskit/qiskit-aer "How does Aer's gate fusion work? What is fusion_max_qubit?"
+
+# How does the backend we're targeting actually work?
+deepwiki ask pytorch/pytorch "How does MPS dispatch element-wise ops vs gather/scatter?"
+
+# What does another fast simulator do differently?
+deepwiki ask quantumlib/qsim "How does qsim apply 2-qubit gates to the statevector?"
+```
+
+Key repos to query:
+- **`Qiskit/qiskit-aer`** — our SOTA comparison target. Gate fusion (up to 5q), AVX2 SIMD kernels, OpenMP parallelization, interleaved real/imag memory layout.
+- **`quantumlib/qsim`** — Google's simulator. Aggressive gate fusion, AVX/FMA vectorization, multi-threaded statevector updates.
+- **`pytorch/pytorch`** — MPS backend internals. How Metal kernels are dispatched, gather/scatter implementation, threshold-based dispatch between custom Metal kernels vs MPSGraph.
+
+**Web search** — find papers, docs, and source code for novel techniques:
+
+```
+# Academic papers on simulation techniques
+WebSearch "quantum statevector simulator gate fusion optimization 2025 2026"
+
+# PyTorch MPS performance details not in DeepWiki
+WebSearch "pytorch MPS backend Metal kernel dispatch performance"
+
+# Pull and read a specific paper or source file
+WebFetch <url> "Extract the key optimization techniques described..."
+```
+
+Known leads from prior research:
+- **DiaQ** (arxiv 2405.01250): sparse diagonal format for statevector simulation. Most gates touch only a few diagonals of the full unitary. `O(d*N)` instead of dense matmul. 40-69% speedups reported. Our stride-based slicing is a hand-rolled version of this for 1q/2q — the DiaQ framework suggests generalizing further.
+- **QMin** (Springer 2025): cost-aware fusion — deciding *when* fusion helps vs hurts based on gate count and qubit count.
+- **BQSim** (ASPLOS 2025): decision-diagram based batch simulation exploiting gate matrix regularity/sparsity.
+- **MPS gather/scatter**: implemented as custom Metal kernels with 1 thread per element via `mtl_dispatch1DJob`. No explicit WAR hazard tracking — relies on Metal's automatic tracking, which doesn't catch intra-buffer dependencies (explains F6 failure).
+
 ### 3. Implement
 
-Edit `src/quantum/system.py`. Priorities:
+Edit `src/quantum/system.py` and/or `src/quantum/gates.py`. Priorities:
 - Structural clarity over micro-optimization
 - General solutions over case-specific fixes
 - Fewer full-state passes over faster individual passes
@@ -140,7 +181,7 @@ The chart must include **SOTA reference lines** from the "SOTA Reference — Qis
 | File | Purpose |
 |------|---------|
 | `src/quantum/system.py` | Simulation engine — the optimization target |
-| `src/quantum/gates.py` | Gate types and circuit API — do not modify |
+| `src/quantum/gates.py` | Gate types and circuit API — internals modifiable, public API frozen |
 | `benchmarks/run.py` | Benchmark harness (`bench`) |
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
 | `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
