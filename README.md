@@ -99,7 +99,7 @@ Latest full benchmark artifact:
 - Commit: `8fe4ed4`
 - Completed correctness: 22/22 PASS (with known MPS rank-limit failures on `ghz_state_16` and `ghz_state_18`)
 
-### Progress (Single Panel)
+### Progress
 
 ![Optimization progress (single panel)](docs/images/optimization-progress-core6-single-panel.png)
 
@@ -112,12 +112,6 @@ Progress summary:
 | Expanded suite total @10000 (`2026-02-10T230611` -> latest) | 592.91s | 2.85s | 207.8x |
 
 ### Latest SOTA Comparison
-
-Source artifacts:
-
-- Full (`native` vs `aer`): `benchmarks/results/compare-2026-02-11T012858.jsonl`
-- Static intersection (`native` vs `aer` vs `qsim`): `benchmarks/results/compare-2026-02-11T012930.jsonl`
-- Report: `benchmarks/results/compare-2026-02-11T012858.md`
 
 | Scope | Shot count | Native | Aer | qsim | Native vs Aer | Native vs qsim |
 |---|---:|---:|---:|---:|---:|---:|
