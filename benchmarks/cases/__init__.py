@@ -75,3 +75,12 @@ ALL_CASES: list[Callable[[], BenchmarkCase]] = [
 ]
 
 ALL_CASES.extend(discover_qasm_cases())
+
+CORE_CASES: list[Callable[[], BenchmarkCase]] = [
+    bell_state,
+    simple_grovers,
+    real_grovers,
+    ghz_state,
+    qft,
+    teleportation,
+]

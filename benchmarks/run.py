@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from benchmarks.cases import BenchmarkCase, ALL_CASES
+from benchmarks.cases import BenchmarkCase, ALL_CASES, CORE_CASES
 from quantum import run_simulation, infer_resources
 from quantum.gates import Gate, Measurement, ConditionalGate, Circuit
 
@@ -256,6 +256,8 @@ def run_case(
     device: torch.device,
     verbose: bool,
     git_hash: str,
+    *,
+    case_timeout: float | None = None,
 ) -> dict:
     n_qubits = case.n_qubits
     display_qubits = n_qubits if n_qubits is not None else infer_resources(case.circuit)[0]
@@ -273,8 +275,7 @@ def run_case(
     result_max: dict[str, int] | None = None
     memory_stats: dict[str, float] = {}
     max_shots = max(SHOT_COUNTS)
-    oom_shots: int | None = None
-    oom_error: str | None = None
+    abort_reason: str | None = None
 
     for shots in SHOT_COUNTS:
         try:
@@ -287,14 +288,17 @@ def run_case(
             cpu_elapsed = time.process_time() - cpu_start
         except RuntimeError as error:
             if is_oom_error(error):
-                oom_shots = shots
-                oom_error = str(error).strip()
+                abort_reason = f"OOM at {shots} shots: {str(error).strip()}"
                 clear_device_cache(device)
                 break
             raise
 
         times[str(shots)] = round(wall_elapsed, 4)
         cpu_times[str(shots)] = round(cpu_elapsed, 4)
+
+        if case_timeout is not None and wall_elapsed > case_timeout:
+            abort_reason = f"timeout at {shots} shots ({wall_elapsed:.1f}s > {case_timeout:.0f}s)"
+            break
 
         if shots == max_shots:
             result_max = result
@@ -305,16 +309,16 @@ def run_case(
         raise RuntimeError(f"{case.name}: no shot count completed successfully.")
     metric_shots = max(completed_shots)
 
-    if oom_shots is None:
-        assert result_max is not None
-        correct, errors = check_correctness(result_max, case.expected, case.tolerance)
-    else:
+    if abort_reason is not None:
         if not memory_stats:
             memory_stats = get_memory_stats(device)
         correct = False
-        errors = [f"OOM at {oom_shots} shots"]
-        if oom_error:
-            errors.append(oom_error)
+        errors = [abort_reason]
+    elif result_max is not None:
+        correct, errors = check_correctness(result_max, case.expected, case.tolerance)
+    else:
+        correct = False
+        errors = ["incomplete shot ladder"]
 
     # Derived metrics at highest configured shot count
     wall_max = times[str(metric_shots)]
@@ -328,7 +332,7 @@ def run_case(
             (
                 f"{s} \u2192 {times[str(s)]:.3f}s (cpu: {cpu_times[str(s)]:.3f}s)"
                 if str(s) in times else
-                f"{s} \u2192 OOM"
+                f"{s} \u2192 skipped"
             )
             for s in SHOT_COUNTS
         )
@@ -338,8 +342,8 @@ def run_case(
         print(f"  shots:    {shots_str}")
         print(f"  ops/s:    {ops_per_sec}  |  shots/s: {shots_per_sec}  |  cpu util: {cpu_util} (at {metric_shots} shots)")
         print(f"  memory:   {mem_str}")
-        if oom_shots is not None:
-            status = f"OOM \u2014 {'; '.join(errors)}"
+        if abort_reason is not None:
+            status = f"ABORT \u2014 {abort_reason}"
         else:
             status = "PASS" if correct else f"FAIL \u2014 {'; '.join(errors)}"
         print(f"  correct:  {status}")
@@ -362,8 +366,8 @@ def run_case(
         "cpu_util": cpu_util,
         "memory": {k: round(v, 2) for k, v in memory_stats.items()},
         "correct": correct,
-        "oom": oom_shots is not None,
-        "oom_shots": oom_shots,
+        "aborted": abort_reason is not None,
+        "abort_reason": abort_reason,
         "errors": errors,
     }
 
@@ -377,13 +381,28 @@ def main() -> None:
         default=None,
         help="Run only the selected benchmark case names.",
     )
+    parser.add_argument(
+        "--core",
+        action="store_true",
+        help="Run only the core-6 cases (bell_state, simple_grovers, real_grovers, ghz_state, qft, teleportation).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Max wall-clock seconds per case per shot count. Cases exceeding this are aborted (default: 30).",
+    )
     args = parser.parse_args()
 
-    all_case_map = {case_fn().name: case_fn for case_fn in ALL_CASES}
-    if len(all_case_map) != len(ALL_CASES):
-        raise RuntimeError("Duplicate benchmark case names detected.")
+    if args.core and args.cases:
+        parser.error("Cannot use both --core and --cases.")
 
-    if args.cases is not None:
+    if args.core:
+        cases_to_run = CORE_CASES
+    elif args.cases is not None:
+        all_case_map = {case_fn().name: case_fn for case_fn in ALL_CASES}
+        if len(all_case_map) != len(ALL_CASES):
+            raise RuntimeError("Duplicate benchmark case names detected.")
         unknown_cases = [name for name in args.cases if name not in all_case_map]
         if unknown_cases:
             parser.error(f"Unknown case(s): {', '.join(unknown_cases)}")
@@ -395,30 +414,51 @@ def main() -> None:
     git_hash = get_git_hash()
     print(f"Device: {device.type} | Git: {git_hash} | Shots: {SHOT_COUNTS}")
 
+    # Sort cases by qubit count ascending so small/fast cases run and save first
+    instantiated = [case_fn() for case_fn in cases_to_run]
+    instantiated.sort(key=lambda c: c.n_qubits if c.n_qubits is not None else infer_resources(c.circuit)[0])
+
+    # Incremental JSONL output — each result flushed immediately for OOM resilience
+    results_dir = Path(__file__).parent / "results"
+    results_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    output_path = results_dir / f"{timestamp}.jsonl"
+
     results: list[dict] = []
     failures: list[str] = []
 
-    for case_fn in cases_to_run:
-        case = case_fn()
-        try:
-            result = run_case(case, device, args.verbose, git_hash)
-        except Exception as e:
-            print(f"\nERROR in {case.name}: {e}")
-            failures.append(case.name)
-            continue
-        results.append(result)
-        if not result["correct"]:
-            failures.append(result["case"])
+    with open(output_path, "w") as jsonl_f:
+        for case in instantiated:
+            try:
+                result = run_case(case, device, args.verbose, git_hash, case_timeout=args.timeout)
+            except Exception as e:
+                print(f"\nERROR in {case.name}: {e}")
+                failures.append(case.name)
+                continue
+            results.append(result)
+            jsonl_f.write(json.dumps(result) + "\n")
+            jsonl_f.flush()
+            if not result["correct"]:
+                failures.append(result["case"])
 
-    # Summary
+    print(f"Wrote {output_path}")
+
+    # Summary — only include cases that completed all shot counts
     summary_payload: dict[str, object] = {}
     if results:
-        static_rows = [row for row in results if row["workload_class"] == "static"]
-        dynamic_rows = [row for row in results if row["workload_class"] == "dynamic"]
+        complete_results = [r for r in results if not r.get("aborted") and all(str(s) in r["times_s"] for s in SHOT_COUNTS)]
+        aborted_count = sum(1 for r in results if r.get("aborted"))
 
-        totals_all = _totals_for_rows(results)
+        static_rows = [row for row in complete_results if row["workload_class"] == "static"]
+        dynamic_rows = [row for row in complete_results if row["workload_class"] == "dynamic"]
+
+        totals_all = _totals_for_rows(complete_results)
         totals_static = _totals_for_rows(static_rows)
         totals_dynamic = _totals_for_rows(dynamic_rows)
+
+        if aborted_count > 0:
+            print(f"\nAborted: {aborted_count} case(s) (excluded from totals)")
+        print(f"Complete: {len(complete_results)}/{len(results)} cases")
 
         print(f"\nTotal time by shot count (all):\n    {_format_totals_line(totals_all)}")
         print(f"Total time by shot count (static):\n    {_format_totals_line(totals_static)}")
@@ -442,6 +482,8 @@ def main() -> None:
             },
             "counts": {
                 "cases_total": len(results),
+                "cases_complete": len(complete_results),
+                "cases_aborted": aborted_count,
                 "cases_static": len(static_rows),
                 "cases_dynamic": len(dynamic_rows),
             },
@@ -455,18 +497,6 @@ def main() -> None:
 
     if failures:
         print(f"\nFAILED: {', '.join(failures)}")
-
-    # Write JSONL
-    results_dir = Path(__file__).parent / "results"
-    results_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
-    output_path = results_dir / f"{timestamp}.jsonl"
-
-    with open(output_path, "w") as f:
-        for r in results:
-            f.write(json.dumps(r) + "\n")
-
-    print(f"Wrote {output_path}")
 
     if summary_payload:
         summary_path = output_path.with_suffix(".summary.json")

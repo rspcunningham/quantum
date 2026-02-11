@@ -19,7 +19,7 @@ import torch
 
 from benchmarks.backends import create_backend, known_backends
 from benchmarks.backends.base import BackendAdapter
-from benchmarks.cases import ALL_CASES, BenchmarkCase
+from benchmarks.cases import ALL_CASES, CORE_CASES, BenchmarkCase
 from benchmarks.ir import build_circuit_ir
 from benchmarks.run import SHOT_COUNTS, check_correctness, count_ops, get_git_hash, infer_resources
 
@@ -255,6 +255,11 @@ def main() -> None:
         help="Optional explicit case-name subset.",
     )
     parser.add_argument(
+        "--core",
+        action="store_true",
+        help="Run only the core-6 cases (bell_state, simple_grovers, real_grovers, ghz_state, qft, teleportation).",
+    )
+    parser.add_argument(
         "--repetitions",
         type=int,
         default=3,
@@ -263,13 +268,23 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true", help="Per-case backend details.")
     args = parser.parse_args()
 
+    if args.core and args.cases:
+        parser.error("Cannot use both --core and --cases.")
+
     if args.repetitions <= 0:
         parser.error("--repetitions must be >= 1")
 
-    try:
-        cases = _select_cases(requested_cases=args.cases, suite=args.suite)
-    except RuntimeError as error:
-        parser.error(str(error))
+    if args.core:
+        core_names = [case_fn().name for case_fn in CORE_CASES]
+        try:
+            cases = _select_cases(requested_cases=core_names, suite=args.suite)
+        except RuntimeError as error:
+            parser.error(str(error))
+    else:
+        try:
+            cases = _select_cases(requested_cases=args.cases, suite=args.suite)
+        except RuntimeError as error:
+            parser.error(str(error))
 
     if not cases:
         parser.error("No cases selected after applying suite/case filters.")

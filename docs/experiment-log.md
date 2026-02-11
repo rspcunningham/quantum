@@ -1,10 +1,12 @@
 # Experiment Log
 
-Each row corresponds to a checkpoint in `docs/progress-data.md` by `idx`. Failed experiments (no checkpoint) are marked with `F` between the relevant indices.
+Each row corresponds to a checkpoint in `docs/progress-data.md` (full-suite) or `docs/progress-data-core.md` (core-6, legacy) by `idx`. Failed experiments (no checkpoint) are marked with `F` between the relevant indices.
 
 Machine: Apple M1 Max, 32 GB. Backend: PyTorch MPS.
 
-| idx | Commit | What changed | Core-6 @1000 | Verdict |
+Metric column: core-6 @1000 total for idx 0-24; full-suite @1000 total (complete cases) from idx 25 onward.
+
+| idx | Commit | What changed | Metric @1000 | Verdict |
 |---:|---|---|---:|---|
 | 0 | `bade1de` | Pre-optimization baseline. Full-matrix Kronecker/swap gate application. | 718.68s | Baseline |
 | 1 | `bade1de` | Re-run, no code change. | 721.60s | (noise check) |
@@ -37,3 +39,4 @@ Machine: Apple M1 Max, 32 GB. Backend: PyTorch MPS.
 | F4 | (reverted) | Raised permutation fusion threshold from ≤12q to ≤15q. Numpy compile cost at 13-15q (dim 8192-32768) exceeds MPS per-gate gather savings. `brickwork_entangler_15` 3.6x slower, `reversible_mix_15` 3.1x slower, `clifford_scrambler_14` 2.2x slower, `random_universal_14` 1.4x slower. | — | Did not work |
 | F5 | (reverted) | Batch pre-transfer + matmul for 1q dense gates on MPS. Batch-transferred all 1q gate matrices in one stack→to(device) call, then used torch.matmul instead of scalar dispatch. `simple_grovers` correctness FAIL, `random_universal_14` 7x regression with 15GB MPS memory explosion. Root cause unclear. | — | Did not work |
 | F6 | (reverted) | In-place view writes for 1q/2q dense gates. Replaced `torch.stack` + reshape with direct writes to `state[:,:,0,:]` and `state[:,:,1,:]`. Core-6 improved 21% but `brickwork_entangler_15` regressed 25-43%. WAR hazard on MPS at 15q: writes to same memory that was just read forces pipeline stall. Broad static improvement only 2.5% — not worth the regression. | — | Did not work |
+| 25 | `654bc2c` | Expanded suite from 24 to 156 cases via QASM pipeline (10 circuit families, roundtrip + dynamic variants, 2-24q). Benchmark infra overhaul: `--core` flag for legacy core-6 runs, incremental JSONL writes for OOM resilience, qubit-count sorting. Full-suite Aer baseline established. Progress tracking split into core-6 and full-suite. | (infra) | Infra |

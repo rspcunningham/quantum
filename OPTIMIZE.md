@@ -118,21 +118,29 @@ Always commit **before** running benchmarks. This creates a 1:1 mapping between 
 # Full suite with per-case detail (primary command)
 uv run bench -v
 
+# Core-6 only (legacy — saturated at Aer parity)
+uv run bench --core -v
+
+# Custom timeout (default 30s per case per shot count)
+uv run bench -v --timeout 60
+
 # Run specific cases only (for quick iteration during development)
 uv run bench -v --cases real_grovers qft adaptive_feedback_5q
 ```
 
-The harness runs each case at shot counts `[1, 10, 100, 1000, 10000]` and checks correctness at the highest completed count against expected output distributions.
+The harness runs each case at shot counts `[1, 10, 100, 1000, 10000]` and checks correctness at the highest completed count against expected output distributions. Cases are sorted by qubit count ascending (small/fast first). Each result is flushed to disk immediately for crash resilience.
+
+Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted — remaining shots are skipped and the case is excluded from totals. This prevents 20-24q cases from dominating runtime.
 
 **Output**:
-- Per-case: wall time, CPU time, ops/sec, memory, correctness (PASS/FAIL)
-- Summary: totals split by static/dynamic, hotspot analysis
+- Per-case: wall time, CPU time, ops/sec, memory, correctness (PASS/FAIL/ABORT)
+- Summary: totals for complete cases only (aborted/OOM cases excluded), split by static/dynamic, hotspot analysis
 - Files: `benchmarks/results/<timestamp>.jsonl` + `.summary.json`
 
 ### 6. Evaluate
 
 Compare the new run against the prior baseline:
-- **Correctness**: all 22 cases must PASS. A faster but incorrect simulator is useless.
+- **Correctness**: all cases must PASS. A faster but incorrect simulator is useless.
 - **Broad improvement**: check static totals AND dynamic totals at both @1000 and @10000. An optimization that helps one family but regresses another is suspect.
 - **Shot scaling**: compare @1000 vs @10000 for static circuits. If they scale linearly, unitary evolution is leaking into the shot loop (an algorithmic bug, not a micro-optimization problem).
 
@@ -141,6 +149,9 @@ For SOTA comparison against Qiskit Aer and Google qsim:
 ```bash
 # Full suite: native vs Aer (3 reps, median reported)
 uv run bench-compare -v
+
+# Core-6 only
+uv run bench-compare --core -v
 
 # Static-only: native vs Aer vs qsim
 uv run bench-compare --suite static --backends native aer qsim -v
@@ -156,13 +167,15 @@ uv run bench-compare-report benchmarks/results/compare-<timestamp>.jsonl
 
 After each iteration, update three things:
 
-**a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, core-6 @1000 result, verdict.
+**a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metric, verdict. The result metric is the full-suite total @1000 for complete cases (format: `Xs (N cases)`).
 
-**b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md` with the core-6 totals from the new benchmark run. The core-6 cases are: `bell_state`, `simple_grovers`, `real_grovers`, `ghz_state`, `qft`, `teleportation`. Extract their per-shot-count totals from the JSONL and add a new row.
+**b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md` with the full-suite totals from the new benchmark run. Only include cases that completed all 5 shot counts in the totals. Cases that OOM are excluded. Record the `cases_complete` count.
+
+For core-6 tracking (legacy, saturated): the core-6 data lives in `docs/progress-data-core.md`. The core-6 cases are: `bell_state`, `simple_grovers`, `real_grovers`, `ghz_state`, `qft`, `teleportation`.
 
 **c) Progress chart** — first, **read the existing `docs/progress.png`** to see what the current chart looks like. Then regenerate it from the updated `docs/progress-data.md`. Write a one-off Python script that reads the table, plots the series (log-scale Y, one line per shot count), and saves the PNG. Use `matplotlib` (available in the project venv). Don't commit the script — just run it ephemerally and commit the resulting image. After generating, **read the new image** to verify it looks correct and to inform your next hypothesis — the shape of the curves tells you where the remaining headroom is.
 
-The chart must include **SOTA reference lines** from the "SOTA Reference — Qiskit Aer (Core-6)" section in `docs/progress-data.md`. For each shot count that has a non-null `aer_total_s` value, plot a horizontal dashed line at that Y value spanning the full X range. Use the same color as the corresponding shot-count series line, with `linestyle='--'`, `alpha=0.4`, `linewidth=1`. Do **not** add the SOTA lines to the legend — instead, place a single italic "Aer" text annotation at the right edge of the plot, vertically centered on the geometric mean of the Aer values (using `ax.annotate` with `xycoords=('axes fraction', 'data')`). If all Aer values are `null`, skip the SOTA lines silently.
+The chart must include **SOTA reference lines** from the "SOTA Reference — Qiskit Aer (Full Suite)" section in `docs/progress-data.md`. For each shot count that has a non-null `aer_total_s` value, plot a horizontal dashed line at that Y value spanning the full X range. Use the same color as the corresponding shot-count series line, with `linestyle='--'`, `alpha=0.4`, `linewidth=1`. Do **not** add the SOTA lines to the legend — instead, place a single italic "Aer" text annotation at the right edge of the plot, vertically centered on the geometric mean of the Aer values (using `ax.annotate` with `xycoords=('axes fraction', 'data')`). If all Aer values are `null`, skip the SOTA lines silently.
 
 ## Interpreting results
 
@@ -176,18 +189,26 @@ The chart must include **SOTA reference lines** from the "SOTA Reference — Qis
 
 **Known failures**: `ghz_state_16` and `ghz_state_18` fail on MPS due to a tensor rank limit (MPS supports rank ≤ 16). These are backend-limit failures, not correctness bugs.
 
+**Abort handling**: Cases that OOM or exceed `--timeout` at any shot count break out of the shot ladder early. Aborted cases are excluded from totals — only cases completing all 5 shot counts are summed. Results are written incrementally to JSONL, so even if a large case causes an OS-level kill (exit 137), all prior results are preserved.
+
 ## Key files
 
 | File | Purpose |
 |------|---------|
 | `src/quantum/system.py` | Simulation engine — the optimization target |
 | `src/quantum/gates.py` | Gate types and circuit API — internals modifiable, public API frozen |
+| `src/quantum/qasm.py` | QASM 2.0 parser |
 | `benchmarks/run.py` | Benchmark harness (`bench`) |
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
 | `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
-| `benchmarks/cases/` | Benchmark case definitions — do not modify |
+| `benchmarks/cases/` | Hand-coded benchmark case definitions — do not modify |
+| `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
+| `benchmarks/expected/` | Expected distributions from Aer |
+| `benchmarks/generate_circuits.py` | QASM circuit generator |
+| `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log (what was tried, what worked, what didn't) |
-| `docs/progress-data.md` | Raw data for the progress chart |
+| `docs/progress-data.md` | Full-suite progress chart data |
+| `docs/progress-data-core.md` | Core-6 progress chart data (legacy, saturated) |
 
 ## Anti-patterns
 

@@ -2,16 +2,24 @@
 
 A state-vector quantum circuit simulator built from scratch with PyTorch, targeting Apple Silicon (MPS) as a first-class backend.
 
-![Optimization progress](docs/progress.png)
+### Core-6 (saturated — at Aer parity)
 
-| Shots | Baseline | Current | Speedup |
-|---:|---:|---:|---:|
-| @1 | 150.39s | 0.024s | 6,300x |
-| @10 | 156.37s | 0.019s | 8,100x |
-| @100 | 210.54s | 0.019s | 11,400x |
-| @1000 | 718.68s | 0.019s | 38,400x |
+![Core-6 optimization progress](docs/progress-core.png)
 
-Raw data: [`docs/progress-data.md`](docs/progress-data.md). Detailed run log: [`docs/experiment-log.md`](docs/experiment-log.md).
+| Shots | Baseline | Current | Speedup | Aer |
+|---:|---:|---:|---:|---:|
+| @1 | 150.39s | 0.024s | 6,300x | 0.015s |
+| @10 | 156.37s | 0.019s | 8,100x | 0.016s |
+| @100 | 210.54s | 0.019s | 11,400x | 0.016s |
+| @1000 | 718.68s | 0.019s | 38,400x | 0.019s |
+
+The core-6 reached Aer parity — these small circuits (2-13 qubits, 4-184 gates) no longer challenge the simulator. To drive further optimization, the benchmark suite was expanded to 156 cases spanning 2-24 qubits with circuits up to 1776 gates, covering 10 circuit families (BV, DJ, Grover, QPE, QAOA, GHZ, W-state, Graph-state, QFT, Simon) plus roundtrip and dynamic variants.
+
+### Full suite (156 cases — active optimization target)
+
+![Full-suite optimization progress](docs/progress.png)
+
+Full-suite progress data: [`docs/progress-data.md`](docs/progress-data.md). Core-6 data: [`docs/progress-data-core.md`](docs/progress-data-core.md). Detailed run log: [`docs/experiment-log.md`](docs/experiment-log.md).
 
 ## Why this exists
 
@@ -45,27 +53,24 @@ Big-endian qubit ordering (qubit 0 is the leftmost bit). Supports CUDA, MPS, and
 ## Benchmark suite
 
 ```bash
-uv run bench          # run all cases, print totals
-uv run bench -v       # verbose: per-case timing + correctness details
+uv run bench -v                  # full suite (156 cases, 30s timeout per shot)
+uv run bench --core -v           # core-6 only (legacy)
+uv run bench --timeout 60 -v    # custom timeout (seconds per case per shot count)
 uv run bench --cases real_grovers qft
 ```
 
-24 cases covering static circuits (terminal-only measurements), dynamic circuits (mid-circuit measurement + conditionals), and scaling stress tests from 2 to 18 qubits. Cases live in `benchmarks/cases/`. Each run checks correctness against expected output distributions.
+156 cases covering static circuits (terminal-only measurements), dynamic circuits (mid-circuit measurement + conditionals), and scaling stress tests from 2 to 24 qubits. Cases include 24 hand-coded benchmarks plus 132 QASM-loaded circuits auto-discovered from `benchmarks/circuits/`. Each run checks correctness against expected output distributions.
+
+Cases are sorted by qubit count (small first) and results are written incrementally to JSONL — if a large case OOMs or the process is killed, all prior results are preserved. Cases exceeding the per-shot timeout (default 30s) or running out of memory are aborted and excluded from totals.
 
 ### SOTA comparison
 
 ```bash
 uv run bench-compare -v                                    # native vs Aer
+uv run bench-compare --core -v                             # core-6 only
 uv run bench-compare --suite static --backends native aer qsim -v  # + qsim
 uv run bench-compare-report benchmarks/results/compare-*.jsonl     # markdown report
 ```
-
-| Scope | Shots | Native | Aer | qsim |
-|---|---:|---:|---:|---:|
-| Full suite | 1000 | 2.55s | 0.61s | n/a |
-| Full suite | 10000 | 2.69s | 2.95s | n/a |
-| Static intersection | 1000 | 0.98s | 0.21s | 0.21s |
-| Dynamic subset | 10000 | 1.77s | 2.66s | n/a |
 
 ## Optimization workflow
 
@@ -81,7 +86,16 @@ See `examples/` for standalone scripts: a Bell state, a simple Grover's search, 
 |------|---------|
 | `src/quantum/system.py` | Simulation engine |
 | `src/quantum/gates.py` | Gate types and circuit API |
+| `src/quantum/qasm.py` | QASM 2.0 parser |
 | `OPTIMIZE.md` | Optimization workflow guide |
-| `benchmarks/` | Benchmark harness, profiler, SOTA comparison |
+| `benchmarks/run.py` | Benchmark harness (`bench`) |
+| `benchmarks/trace.py` | Profiler (`bench-trace`) |
+| `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
+| `benchmarks/cases/` | Hand-coded benchmark case definitions |
+| `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
+| `benchmarks/expected/` | Expected distributions from Aer |
+| `benchmarks/generate_circuits.py` | QASM circuit generator |
+| `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log |
-| `docs/progress-data.md` | Raw progress chart data |
+| `docs/progress-data.md` | Full-suite progress chart data |
+| `docs/progress-data-core.md` | Core-6 progress chart data |
