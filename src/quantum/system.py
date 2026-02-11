@@ -206,10 +206,10 @@ def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gat
 def _fuse_segment_permutations(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
     """Replace consecutive permutation gate runs with a single pre-fused permutation.
 
-    Uses numpy for CPU computation. Only applied when n_qubits <= 13 where
-    numpy compile cost is less than MPS per-gate gather cost.
+    Uses numpy for CPU computation. At ≤15 qubits (dim ≤ 32768) the numpy
+    compile cost is well below the MPS per-gate gather savings (~108μs each).
     """
-    if n_qubits > 12:
+    if n_qubits > 15:
         return gates
 
     n = len(gates)
