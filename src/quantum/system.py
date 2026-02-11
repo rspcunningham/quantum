@@ -901,8 +901,7 @@ class BatchedQuantumSystem:
         new_0 = g00 * s0 + g01 * s1
         new_1 = g10 * s0 + g11 * s1
 
-        state[:, :, 0, :] = new_0
-        state[:, :, 1, :] = new_1
+        self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
         return self
 
     def _apply_dense_two_qubit_gate(self, gate: Gate, targets: tuple[int, int]) -> "BatchedQuantumSystem":
@@ -932,10 +931,12 @@ class BatchedQuantumSystem:
         out_10 = r[2][0]*s00 + r[2][1]*s01 + r[2][2]*s10 + r[2][3]*s11
         out_11 = r[3][0]*s00 + r[3][1]*s01 + r[3][2]*s10 + r[3][3]*s11
 
-        state[:, :, 0, :, 0, :] = out_00
-        state[:, :, 0, :, 1, :] = out_01
-        state[:, :, 1, :, 0, :] = out_10
-        state[:, :, 1, :, 1, :] = out_11
+        result = torch.stack([
+            torch.stack([out_00, out_01], dim=3),
+            torch.stack([out_10, out_11], dim=3),
+        ], dim=2)
+
+        self.state_vectors = result.reshape(self.batch_size, -1)
         return self
 
     def _apply_diagonal_gate(self, gate: Gate) -> "BatchedQuantumSystem":
