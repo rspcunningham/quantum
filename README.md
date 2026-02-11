@@ -30,12 +30,11 @@ Big-endian qubit ordering (qubit 0 is the leftmost bit). Supports CUDA, MPS, and
 ```bash
 uv run bench          # run all cases, print totals
 uv run bench -v       # verbose: per-case timing + correctness details
-uv run bench --stress # include 10,000-shot stress point
-uv run bench --shots 1,10,1000,10000 --cases real_grovers qft
+uv run bench --cases real_grovers qft
 uv run bench-plot     # plot the most recent results
 ```
 
-Each benchmark case defines a circuit and its theoretical output distribution. By default, the harness runs every case at 1, 10, 100, and 1000 shots. The shot schedule is configurable (`--shots`) and stress mode adds a 10,000-shot point (`--stress`). Correctness is verified at the highest configured shot count by comparing the observed distribution against the expected one within a tolerance. Results are written locally to `benchmarks/results/` (gitignored).
+Each benchmark case defines a circuit and its theoretical output distribution. The harness runs the full suite at fixed shot counts: 1, 10, 100, 1000, and 10000. Correctness is verified at the highest completed shot count by comparing the observed distribution against the expected one within a tolerance. If a case hits out-of-memory, the runner records it as an OOM failure and continues.
 
 ### Cases
 
@@ -50,8 +49,15 @@ Each benchmark case defines a circuit and its theoretical output distribution. B
 | `phase_ladder` | 11 | Deep diagonal-gate stress (RZ + controlled phase round-trip) |
 | `toffoli_oracle` | 11 | Toffoli-heavy nonlinear oracle round-trip |
 | `adaptive_feedback` | 2 | Repeated mid-circuit measurement and conditional feedback |
+| `ghz_state_16` | 16 | Larger GHZ scaling |
+| `ghz_state_18` | 18 | Capacity-push GHZ scaling |
+| `qft_12` | 12 | Larger QFT round-trip |
+| `qft_14` | 14 | Deeper/larger phase-gate pressure |
+| `phase_ladder_13` | 13 | Larger diagonal-gate stress |
+| `toffoli_oracle_13` | 13 | Larger Toffoli-heavy oracle round-trip |
+| `adaptive_feedback_120` | 2 | Long repeated measurement/conditional feedback |
 
-Cases live in `benchmarks/cases/`, one file each.
+Cases live in `benchmarks/cases/`.
 
 ## Optimization workflow
 
@@ -64,7 +70,7 @@ The core development loop:
 5. **Benchmark** — run `uv run bench -v` and evaluate correctness + timing
 6. **Repeat** — use results to drive the next hypothesis
 
-The multiple shot counts (1, 10, 100, 1000) surface optimizations that behave differently at different batch sizes. The correctness check guards against regressions.
+The multiple shot counts (1, 10, 100, 1000, 10000) surface optimizations that behave differently at different batch sizes. The correctness check guards against regressions.
 
 ### For coding agents
 
