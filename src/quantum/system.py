@@ -371,8 +371,7 @@ def _advance_branches_with_gate_sequence(
         next_state_id = transition_cache.get(state_id)
         if next_state_id is None:
             gate_system.state_vectors = state_arena[state_id]
-            for gate in gates:
-                _ = gate_system.apply_gate(gate)
+            gate_system.apply_gate_sequence(gates)
             next_state_id = add_state(gate_system.state_vectors)
             transition_cache[state_id] = next_state_id
 
@@ -654,6 +653,7 @@ class BatchedQuantumSystem:
         self._gate_permutations = {}
         self._gate_permutation_factors = {}
         self._diagonal_subindices = {}
+        self._cpu_diagonal_subindices: dict[tuple[int, ...], torch.Tensor] = {}
         self._permutation_source_indices = {}
         self._permutation_phase_factors = {}
 
@@ -687,6 +687,53 @@ class BatchedQuantumSystem:
 
         self.state_vectors = state.reshape(self.batch_size, -1)
         return self
+
+    @torch.inference_mode()
+    def apply_gate_sequence(self, gates: tuple[Gate, ...]) -> "BatchedQuantumSystem":
+        """Apply a gate sequence with diagonal gate fusion.
+
+        Consecutive diagonal gates are combined into a single factors tensor
+        on CPU and transferred to the device once, eliminating per-gate MPS
+        kernel launch overhead.
+        """
+        n = len(gates)
+        i = 0
+        while i < n:
+            gate = gates[i]
+            if gate.diagonal is None:
+                self.apply_gate(gate)
+                i += 1
+                continue
+            j = i + 1
+            while j < n and gates[j].diagonal is not None:
+                j += 1
+            if j - i == 1:
+                self._apply_diagonal_gate(gate)
+            else:
+                targets0 = tuple(gates[i].targets)
+                subindex0 = self._cpu_diagonal_subindex(targets0)
+                factors = gates[i].diagonal[subindex0].clone()
+                for ki in range(i + 1, j):
+                    targets_k = tuple(gates[ki].targets)
+                    subindex_k = self._cpu_diagonal_subindex(targets_k)
+                    factors.mul_(gates[ki].diagonal[subindex_k])
+                self.state_vectors = self.state_vectors * factors.to(self.device).unsqueeze(0)
+            i = j
+        return self
+
+    def _cpu_diagonal_subindex(self, targets: tuple[int, ...]) -> torch.Tensor:
+        cached = self._cpu_diagonal_subindices.get(targets)
+        if cached is not None:
+            return cached
+        indices = torch.arange(1 << self.n_qubits, dtype=torch.int64)
+        subindex = torch.zeros_like(indices)
+        k = len(targets)
+        for out_pos, target in enumerate(targets):
+            bitpos = self.n_qubits - 1 - target
+            bit = (indices >> bitpos) & 1
+            subindex = subindex | (bit << (k - out_pos - 1))
+        self._cpu_diagonal_subindices[targets] = subindex
+        return subindex
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
         """Apply a dense single-qubit gate via stride-based slicing with CPU scalars."""
