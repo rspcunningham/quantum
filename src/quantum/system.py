@@ -675,6 +675,8 @@ class BatchedQuantumSystem:
 
         if k == 1:
             return self._apply_dense_single_qubit_gate(gate, targets[0])
+        if k == 2:
+            return self._apply_dense_two_qubit_gate(gate, targets)
 
         gate_nd = self._device_gate_tensor(gate.tensor, n_target_qubits=k)
 
@@ -687,8 +689,10 @@ class BatchedQuantumSystem:
         return self
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
-        """Apply a dense single-qubit gate via stride-based slicing (no permutation copies)."""
-        gate_2d = self._device_gate_tensor(gate.tensor, n_target_qubits=1)
+        """Apply a dense single-qubit gate via stride-based slicing with CPU scalars."""
+        g = gate.tensor.reshape(2, 2)
+        g00, g01, g10, g11 = complex(g[0, 0]), complex(g[0, 1]), complex(g[1, 0]), complex(g[1, 1])
+
         a = 1 << target
         b = 1 << (self.n_qubits - target - 1)
 
@@ -696,13 +700,45 @@ class BatchedQuantumSystem:
         s0 = state[:, :, 0, :]
         s1 = state[:, :, 1, :]
 
-        g00, g01 = gate_2d[0, 0], gate_2d[0, 1]
-        g10, g11 = gate_2d[1, 0], gate_2d[1, 1]
-
         new_0 = g00 * s0 + g01 * s1
         new_1 = g10 * s0 + g11 * s1
 
         self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
+        return self
+
+    def _apply_dense_two_qubit_gate(self, gate: Gate, targets: tuple[int, int]) -> "BatchedQuantumSystem":
+        """Apply a dense two-qubit gate via stride-based slicing with CPU scalars."""
+        t0, t1 = targets
+        g = gate.tensor.reshape(4, 4)
+
+        if t0 > t1:
+            t0, t1 = t1, t0
+            perm = [0, 2, 1, 3]
+            r = [[complex(g[perm[i], perm[j]]) for j in range(4)] for i in range(4)]
+        else:
+            r = [[complex(g[i, j]) for j in range(4)] for i in range(4)]
+
+        a = 1 << t0
+        b = 1 << (t1 - t0 - 1)
+        c = 1 << (self.n_qubits - t1 - 1)
+
+        state = self.state_vectors.view(self.batch_size, a, 2, b, 2, c)
+        s00 = state[:, :, 0, :, 0, :]
+        s01 = state[:, :, 0, :, 1, :]
+        s10 = state[:, :, 1, :, 0, :]
+        s11 = state[:, :, 1, :, 1, :]
+
+        out_00 = r[0][0]*s00 + r[0][1]*s01 + r[0][2]*s10 + r[0][3]*s11
+        out_01 = r[1][0]*s00 + r[1][1]*s01 + r[1][2]*s10 + r[1][3]*s11
+        out_10 = r[2][0]*s00 + r[2][1]*s01 + r[2][2]*s10 + r[2][3]*s11
+        out_11 = r[3][0]*s00 + r[3][1]*s01 + r[3][2]*s10 + r[3][3]*s11
+
+        result = torch.stack([
+            torch.stack([out_00, out_01], dim=3),
+            torch.stack([out_10, out_11], dim=3),
+        ], dim=2)
+
+        self.state_vectors = result.reshape(self.batch_size, -1)
         return self
 
     def _apply_diagonal_gate(self, gate: Gate) -> "BatchedQuantumSystem":
