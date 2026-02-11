@@ -203,6 +203,111 @@ def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gat
     return tuple(result)
 
 
+def _fuse_segment_permutations(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
+    """Replace consecutive permutation gate runs with a single pre-fused permutation.
+
+    Uses numpy for CPU computation. Only applied when n_qubits <= 13 where
+    numpy compile cost is less than MPS per-gate gather cost.
+    """
+    if n_qubits > 12:
+        return gates
+
+    n = len(gates)
+    i = 0
+    has_fusion = False
+    while i < n:
+        if gates[i].permutation is not None:
+            j = i + 1
+            while j < n and gates[j].permutation is not None:
+                j += 1
+            if j - i >= 2:
+                has_fusion = True
+                break
+            i = j
+        else:
+            i += 1
+    if not has_fusion:
+        return gates
+
+    dim = 1 << n_qubits
+    indices = np.arange(dim, dtype=np.int64)
+    all_targets = list(range(n_qubits))
+
+    def _full_state_source_indices(gate: Gate) -> np.ndarray:
+        targets = tuple(gate.targets)
+        perm_np = gate.permutation.numpy().astype(np.int64)
+        k = len(targets)
+        subindex = np.zeros(dim, dtype=np.int64)
+        for out_pos, target in enumerate(targets):
+            bitpos = n_qubits - 1 - target
+            bit = (indices >> bitpos) & 1
+            subindex |= bit << (k - out_pos - 1)
+        source_subindex = perm_np[subindex]
+        target_mask = 0
+        for target in targets:
+            target_mask |= 1 << (n_qubits - 1 - target)
+        clear_mask = (1 << n_qubits) - 1 - target_mask
+        si = indices & clear_mask
+        for out_pos, target in enumerate(targets):
+            bitpos = n_qubits - 1 - target
+            bit = (source_subindex >> (k - out_pos - 1)) & 1
+            si = si | (bit << bitpos)
+        return si
+
+    def _full_state_phase_factors(gate: Gate) -> np.ndarray | None:
+        if gate.permutation_factors is None:
+            return None
+        targets = tuple(gate.targets)
+        factors_np = gate.permutation_factors.numpy()
+        k = len(targets)
+        subindex = np.zeros(dim, dtype=np.int64)
+        for out_pos, target in enumerate(targets):
+            bitpos = n_qubits - 1 - target
+            bit = (indices >> bitpos) & 1
+            subindex |= bit << (k - out_pos - 1)
+        return factors_np[subindex]
+
+    result: list[Gate] = []
+    i = 0
+    while i < n:
+        if gates[i].permutation is not None:
+            j = i + 1
+            while j < n and gates[j].permutation is not None:
+                j += 1
+            if j - i >= 2:
+                combined_si = _full_state_source_indices(gates[i])
+                combined_pf = _full_state_phase_factors(gates[i])
+                for k in range(i + 1, j):
+                    next_si = _full_state_source_indices(gates[k])
+                    next_pf = _full_state_phase_factors(gates[k])
+                    if combined_pf is not None:
+                        combined_pf = combined_pf[next_si]
+                        if next_pf is not None:
+                            combined_pf = combined_pf * next_pf
+                    elif next_pf is not None:
+                        combined_pf = next_pf
+                    combined_si = combined_si[next_si]
+                fused_perm = torch.from_numpy(combined_si)
+                fused_factors = (
+                    torch.from_numpy(combined_pf.astype(np.complex64))
+                    if combined_pf is not None
+                    else None
+                )
+                # Gate constructor requires tensor or diagonal; create with
+                # dummy diagonal then override to permutation-only so apply_gate
+                # dispatches to the permutation path.
+                g = Gate(None, *all_targets, diagonal=torch.ones(dim, dtype=torch.complex64))
+                g._diagonal = None
+                g._permutation = fused_perm
+                g._permutation_factors = fused_factors
+                result.append(g)
+                i = j
+                continue
+        result.append(gates[i])
+        i += 1
+    return tuple(result)
+
+
 def _set_classical_bit(value: int, *, bit: int, outcome: int, n_bits: int) -> int:
     """Overwrite one classical register bit in big-endian indexing."""
     if n_bits == 0:
@@ -566,12 +671,13 @@ def _run_compiled_simulation(
 
     compiled = _compile_execution_graph(circuit)
 
-    # Preprocess: fuse consecutive diagonal gates into single full-state diagonals
+    # Preprocess: fuse consecutive diagonal and permutation gate runs
     fused_steps = []
     any_changed = False
     for step in compiled.steps:
         if isinstance(step, _DynamicSegmentStep):
             fused_gates = _fuse_segment_diagonals(step.gates, n_qubits)
+            fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
             if fused_gates is not step.gates:
                 fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
                 any_changed = True
@@ -585,13 +691,17 @@ def _run_compiled_simulation(
             node_count=compiled.node_count,
             terminal_measurements=compiled.terminal_measurements,
         )
-        # Pre-transfer fused diagonals to MPS before main loop to avoid
+        # Pre-transfer fused tensors to MPS before main loop to avoid
         # large CPU→MPS copies during interleaved gate application
         for step in compiled.steps:
             if isinstance(step, _DynamicSegmentStep):
                 for gate in step.gates:
                     if gate._diagonal is not None and len(gate.targets) == n_qubits:
                         gate._diagonal = gate._diagonal.to(device)
+                    if gate._permutation is not None and len(gate.targets) == n_qubits:
+                        gate._permutation = gate._permutation.to(dtype=torch.int64, device=device)
+                        if gate._permutation_factors is not None:
+                            gate._permutation_factors = gate._permutation_factors.to(device)
 
     gate_system = BatchedQuantumSystem(
         n_qubits=n_qubits,
@@ -859,8 +969,20 @@ class BatchedQuantumSystem:
         permutation = gate.permutation
         assert permutation is not None
 
-        permutation_device = self._device_gate_permutation(permutation)
         targets = tuple(gate.targets)
+        k = len(targets)
+
+        if k == self.n_qubits:
+            perm = permutation if permutation.device == self.device else permutation.to(dtype=torch.int64, device=self.device)
+            state = self.state_vectors[:, perm]
+            factors = gate.permutation_factors
+            if factors is not None:
+                pf = factors if factors.device == self.device else factors.to(self.device)
+                state = state * pf.unsqueeze(0)
+            self.state_vectors = state
+            return self
+
+        permutation_device = self._device_gate_permutation(permutation)
         source_indices = self._permutation_source_indices_for_targets(targets, permutation_device)
         state = self.state_vectors[:, source_indices]
 
