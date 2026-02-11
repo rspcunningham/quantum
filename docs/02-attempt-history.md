@@ -1,94 +1,30 @@
-# Attempt History
+# Experiment Log
 
-This document is the canonical record of what has been tried, what worked, and what did not.
+Each row corresponds to a checkpoint in `docs/progress-data.md` by `idx`. Failed experiments (no checkpoint) are marked with `F` between the relevant indices.
 
-## Environment
+Machine: Apple M1 Max, 32 GB. Backend: PyTorch MPS.
 
-- Machine: Apple M1 Max, 32 GB
-- Backend: PyTorch MPS (`torch>=2.9.0`)
-- Benchmark command: `uv run bench -v`
-
-## Attempt Ledger
-
-| # | Commit / State | Hypothesis | Result | Verdict | Evidence |
-|---|---|---|---|---|---|
-| 1 | `587a03f` | Vectorize batched measurement collapse to remove per-shot projection loop. | Total @1000 (6-case suite): `370.99s -> 7.79s` (`47.6x`). | Worked | `2026-02-10T195547.jsonl` vs `2026-02-10T195724.jsonl` |
-| 2 | `eb476df` | Cache gate tensors on device to remove repeated transfers. | Total @1000 (6-case): `7.79s -> 6.53s` (`1.19x`). | Worked | `2026-02-10T195724.jsonl` vs `2026-02-10T195839.jsonl` |
-| 3 | `0c3186d` | Cache measurement weight masks for p(|1>) matmul. | Total @1000 (6-case): `6.53s -> 6.41s` (`1.02x`). | Worked (small) | `2026-02-10T195839.jsonl` vs `2026-02-10T195955.jsonl` |
-| 4 | `63d943f` | Add diagonal gate metadata and diagonal fast path. | Total @10k (14-case suite): `509.54s -> 181.28s` (`2.81x`). | Worked | `2026-02-10T204227.jsonl` vs `2026-02-10T210225.jsonl` |
-| 5 | `e1fa5b0` (bench run at equivalent working tree) | Add monomial/permutation gate metadata + permutation fast path. | Total @10k (14-case): `181.28s -> 94.92s` (`1.91x`). | Worked | `2026-02-10T210225.jsonl` vs `2026-02-10T215408.jsonl` |
-| 6 | Uncommitted experiment, reverted | Replace global permutation gather with local-axis `index_select` path. | Regressed strongly on MPS: `real_grovers` `15.67s -> 22.99s`; `toffoli_oracle_13` `10.85s -> 17.55s` at 10k. | Did not work (reverted) | `2026-02-10T221843.jsonl` vs `2026-02-10T215408.jsonl` |
-| 7 | `a6c5d1b` | Expand benchmark to broad synthetic always-on families (no core/extended split). | Suite expanded from 16 configured cases to 24 configured cases (22 runnable on MPS). New expanded baseline @10k: `592.91s`. | Worked (coverage) | `2026-02-10T230611.jsonl` |
-| 8 | `4e4b2cb` | Terminal-measurement sampling fast path: for circuits without conditionals/non-terminal measurements, evolve once and sample many shots from final distribution. | Expanded suite totals: @1000 `60.33s -> 4.76s` (`12.67x`), @10000 `592.91s -> 5.23s` (`113.35x`). 22/22 runnable cases still PASS. | Worked (major) | `2026-02-10T230611.jsonl` vs `2026-02-10T234124.jsonl` |
-| 9 | `7fbe06b` | On MPS terminal-measurement fast path, sample/count on CPU instead of MPS (`multinomial`/`bincount` offload) to avoid backend sampler overhead and sync stalls. | Expanded suite totals: @1000 `4.76s -> 2.96s` (`1.61x`), @10000 `5.23s -> 3.17s` (`1.65x`). 22/22 runnable cases still PASS. | Worked | `2026-02-10T234124.jsonl` vs `2026-02-10T235128.jsonl` |
-| 10 | `c6d7826` (working tree benchmark state) | Implement H2 dynamic branch engine for conditional/mid-circuit execution with branch splitting/merging and fallback heuristics (enabled by default for dynamic circuits with `n_qubits >= 3`). | Expanded suite totals: @1000 `2.96s -> 2.80s` (`1.06x`), @10000 `3.17s -> 3.00s` (`1.06x`). Compare-vs-Aer (full suite) improved from native/aer ratio `5.79x -> 4.99x` at 1000 shots and `1.47x -> 1.05x` at 10000 shots. | Worked (targeted dynamic gain) | `2026-02-10T235128.jsonl` vs `2026-02-11T010850.jsonl`; `compare-2026-02-11T005222.jsonl` vs `compare-2026-02-11T010956.jsonl` |
-| 11 | `8fe4ed4` (working tree benchmark state) | H2 pass 2: remove dynamic measurement boolean index writes (`index_put_/nonzero`) via mask multiplication and replace `allclose` merge checks with compact state-signature merge bucketing. | Controlled A/B (same commit, full suite, native only, repetitions=3): branch engine enabled vs disabled gave `@1000 3.97s -> 2.68s` (`1.48x`) and `@10000 4.30s -> 2.78s` (`1.55x`). Dynamic-only speedup: `1.69x` (@1000), `1.78x` (@10000). | Worked (major dynamic-path gain) | `compare-2026-02-11T012341.jsonl` vs `compare-2026-02-11T012324.jsonl` |
-| 12 | `d310883` (working tree benchmark state) | Replace hard branch-engine gate (`n_qubits >= 3`) with workload-aware dispatch: use branch mode for low-qubit circuits when dynamic op count is high (env-tunable thresholds). | Controlled A/B (same commit, full suite, native only): low-qubit branch dispatch enabled vs disabled gave `@1000 2.00s -> 1.82s` (`1.10x`) and `@10000 2.13s -> 1.83s` (`1.16x`). Dynamic-only speedup: `1.17x` (@1000), `1.29x` (@10000). | Worked (general dynamic dispatch gain) | `2026-02-11T014954.jsonl` vs `2026-02-11T014743.jsonl`; profiler: `trace_adaptive_feedback_120_10000_current.json` vs `trace_adaptive_feedback_120_10000_h3_default.json` |
-| 13 | `d310883` (working tree benchmark state) | Remove dynamic dispatch heuristics and always route dynamic circuits through the branch engine. | Simplified policy; on the current benchmark suite, this is behavior-equivalent because all dynamic cases already satisfied the prior routing rule (`n_qubits >= 3` or `dynamic_ops >= 128`). | Worked (simplification, neutral expected impact) | Dynamic-case op audit from `2026-02-11T020119.jsonl` confirms all current dynamic cases would branch under old and new policy. |
-| 14 | Uncommitted analysis experiment | Force static circuits through branch engine (disable terminal-sampling fast path + force dynamic plan) to test unified-engine viability. | Regressed: across 18 static cases at 10000 shots, median total `0.9727s -> 1.4996s` (`1.54x` slower). Worst slowdowns include `ghz_state` (`3.14x`) and `simple_grovers` (`2.51x`). | Did not work | Direct monkeypatch timing experiment (shots=10000, reps=2) run on current tree. |
-| 15 | `b8ba108` (working tree benchmark state) | Refactor dynamic execution into a compiled edge/node graph: gate segments as edges, measurement/conditional as nodes, state-ID path sharing, and measurement-time signature dedup. | Dynamic subset (same code, native only) vs disabling branch engine: @10000 `3.72s -> 1.09s` (`3.41x`), @1000 `3.29s -> 1.07s` (`3.07x`). Full-suite run after refactor: @1000 `2.53s`, @10000 `2.53s`. | Worked (architecture + strong dynamic win vs fallback) | `2026-02-11T022010.jsonl` vs `2026-02-11T021916.jsonl`; full suite `2026-02-11T021936.jsonl`; trace `trace_adaptive_feedback_120_10000_graphir.json`. |
-| 16 | Uncommitted working tree | Unify execution orchestration: compile all circuits into one graph format and make `node_count == 0` use edge-only execution + terminal sink sampling (single executor entrypoint for static and dynamic). | Functional target achieved (single compiled executor path in `run_simulation`, static still uses sink fast path via zero-node branch). Static and dynamic correctness passed on targeted suite (`2026-02-11T024041.jsonl`). Full-suite reruns are noisy; current runs landed around `@10000 2.79s` (`2026-02-11T024138.jsonl`) with expected MPS failures unchanged (`ghz_state_16`, `ghz_state_18`). | Worked (architecture); perf impact inconclusive/noisy | `2026-02-11T024041.jsonl`; `2026-02-11T024103.jsonl`; `2026-02-11T024138.jsonl` |
-| 17 | `a85bf9c` | Replace permute→reshape→matmul→reshape→inverse-permute dense gate path with `torch.tensordot` contraction + `torch.movedim`. Eliminates `_axis_permutation_for_targets` helper and its cache. Gate tensors cached in ND `(2,)*2k` form. | Full suite: @1000 `2.48s`, @10000 `2.48s`. 22/22 PASS. Performance neutral (within MPS noise vs prior baseline). Code simplified: -31 lines, +8 lines. | Worked (simplification, perf-neutral) | `2026-02-11T112001.jsonl` |
-
-## Current Benchmark Scope
-
-Always-on suite now includes:
-
-- Original functional/algorithmic cases
-- Extended sweeps (`qft_14`, `phase_ladder_13`, `toffoli_oracle_13`, etc.)
-- New synthetic families:
-  - `reversible_mix_13`
-  - `reversible_mix_15`
-  - `clifford_scrambler_14`
-  - `brickwork_entangler_15`
-  - `random_universal_12`
-  - `random_universal_14`
-  - `diagonal_mesh_15`
-  - `adaptive_feedback_5q`
-
-## Latest Baseline (Expanded Suite)
-
-Run: `benchmarks/results/2026-02-11T112001.jsonl`
-
-- Completed cases: 22
-- Correctness: 22/22 PASS
-- Total @1000: `2.48s`
-- Total @10000: `2.48s`
-- Speedup vs expanded-suite baseline (`2026-02-10T230611.jsonl`):
-  - @1000: `24.33x`
-  - @10000: `239.08x`
-- Speedup vs post-H0.1 baseline (`2026-02-10T235128.jsonl`):
-  - @1000: `1.19x`
-  - @10000: `1.28x`
-
-Known backend-limit failures (not OOM):
-
-- `ghz_state_16`: `MPS supports tensors with dimensions <= 16, but got 17`
-- `ghz_state_18`: `MPS supports tensors with dimensions <= 16, but got 19`
-
-## Key Takeaways
-
-What worked:
-
-1. Removing asymptotic waste (`O(4^n)` matrix build paths) produced the first major wins.
-2. Structural gate specialization (diagonal, then permutation) produced the next major wins.
-3. Terminal-measurement sampling fast path produced the largest single step on the expanded suite by removing shot-scaled unitary replay on static circuits.
-4. On MPS, terminal-measurement sampling/counting offload to CPU removed a backend-specific sampler bottleneck and delivered another broad step improvement.
-5. Cache cleanup/memory-transfer cleanup gave smaller but real gains.
-6. Dynamic branch execution improved dominant dynamic cases (especially `adaptive_feedback_5q` and `teleportation`) and narrowed the external full-suite gap to near parity at 10000 shots.
-7. Branch-engine pass-2 (mask multiplication + signature-based merge) removed the remaining dynamic indexing and `allclose` merge bottlenecks and delivered another large dynamic speedup in controlled A/B.
-8. Workload-aware dynamic dispatch (op-count-based threshold) preserved the general branch-engine strategy while unlocking additional speedups on high-feedback low-qubit circuits without hard-coding benchmark case IDs.
-9. Always routing dynamic circuits to the branch engine simplifies policy and avoids overfitting dispatch knobs; on current cases, it is behavior-equivalent to the previous thresholded routing.
-10. Compiling dynamic circuits into edge/node steps makes the control-flow model explicit and enables state-ID edge reuse, but merge/fingerprint overhead remains a major target for next-pass optimization.
-11. A unified executor entrypoint is feasible without sacrificing static sink behavior by treating static circuits as zero-node graphs.
-12. Replacing permute/matmul dense gate path with `tensordot` contraction simplifies the code (eliminates axis permutation helper + cache) with neutral performance on MPS. `einsum` was also tested but is consistently slower on MPS and hard-crashes at 15+ qubits due to MPS rank-16 limit.
-
-What did not:
-
-1. Local-axis permutation `index_select` looked promising conceptually but regressed on MPS in practice and was reverted.
-2. Forcing static circuits through the branch engine (instead of terminal-measurement sampling fast path) regressed materially (`~1.54x` slower aggregate in static-case experiment).
-
-What changed strategically:
-
-1. Benchmarking is now broad and always-on; optimization work is measured against general simulator behavior, not narrow case subsets.
-2. Post-H0/H0.1 bottlenecks shifted decisively to dynamic/feedback execution paths; static terminal-measurement circuits are now relatively cheap.
+| idx | Commit | What changed | Core-6 @1000 | Verdict |
+|---:|---|---|---:|---|
+| 0 | `bade1de` | Pre-optimization baseline. Full-matrix Kronecker/swap gate application. | 718.68s | Baseline |
+| 1 | `bade1de` | Re-run, no code change. | 721.60s | (noise check) |
+| 2 | `86fb8c5` | Replaced Kronecker/swap gate application with tensor contraction. Eliminated `O(4^n)` matrix construction. | 533.13s | Worked (1.35x) |
+| 3 | `3df121d` | Tooling cleanup (bench-plot rewrite). Minor env change. | 370.99s | Worked |
+| 4 | `587a03f` | Vectorized batched measurement collapse. Removed per-shot projection loop. | 7.79s | Worked (47.6x) |
+| 5 | `eb476df` | Cached gate tensors on device. Eliminated repeated CPU→MPS transfers. | 6.53s | Worked (1.19x) |
+| 6 | `0c3186d` | Cached measurement weight masks for p(\|1>) matmul. | 6.41s | Worked (1.02x) |
+| 7 | `03a0dbb` | Documentation and .gitignore updates. No simulation changes. | 6.35s | (no change) |
+| 8 | `9701dc6` | Expanded benchmark schedule to include @10000 shots. First 10k data point. | 6.83s / 68.49s @10k | (infra) |
+| 9 | `63d943f` | Added diagonal gate metadata and diagonal fast path. Avoids dense matmul for gates that only scale amplitudes. | 6.88s / 67.12s @10k | Worked (see @10k) |
+| 10 | `63d943f` | Added permutation/monomial gate metadata and permutation fast path. | 2.00s / 18.07s @10k | Worked (3.4x / 3.7x) |
+| 11 | `63d943f` | Re-run of idx 10. | 1.99s / 17.86s @10k | (noise check) |
+| F1 | (reverted) | Replaced global permutation gather with local-axis `index_select`. Regressed on MPS: `real_grovers` 15.67s→22.99s, `toffoli_oracle_13` 10.85s→17.55s @10k. | — | Did not work |
+| 12 | `e1fa5b0` | Expanded suite to 24 cases (22 runnable on MPS) with synthetic families. Permutation fast path included. | 2.02s / 18.80s @10k | (infra) |
+| 13 | `4e4b2cb` | Terminal-measurement sampling fast path. For static circuits: evolve once, sample many. Removed shot-scaled unitary replay. | 0.20s / 0.28s @10k | Worked (10x / 67x) |
+| 14 | `7fbe06b` | MPS sampler offload. Terminal sampling/counting on CPU instead of MPS to avoid backend sampler overhead. | 0.11s / 0.14s @10k | Worked (1.9x / 2.0x) |
+| 15 | `c6d7826` | Dynamic branch engine v1. Branch-state execution for conditional/mid-circuit circuits. Replaces mask-and-restore strategy. | 0.085s / 0.085s @10k | Worked (1.3x / 1.7x) |
+| 16 | `8fe4ed4` | H2 pass 2: mask multiplication, signature-based merge bucketing. Removed `nonzero`/`allclose` from dynamic path. | 0.090s / 0.093s @10k | Worked |
+| 17 | `8fe4ed4` | Re-run with workload-aware dispatch + always-branch-dynamic simplification. | 0.081s / 0.080s @10k | Worked (simplification) |
+| F2 | (reverted) | Forced static circuits through branch engine (disabled terminal-sampling fast path). Regressed: median 1.54x slower across 18 static cases @10k. | — | Did not work |
+| 18 | `bab05d4` | Compiled edge/node dynamic graph executor. Unified static/dynamic into one graph format (static = zero-node graph). | 0.086s / 0.088s @10k | Worked (architecture) |
+| 19 | `a85bf9c` | Replaced permute/matmul dense gate path with `tensordot` contraction. Cleaner code, perf-neutral. `einsum` also tested — slower on MPS, crashes at 15q+. | 0.077s / 0.081s @10k | Worked (simplification) |

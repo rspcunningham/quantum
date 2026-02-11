@@ -82,6 +82,5 @@ See `examples/` for standalone scripts: a Bell state, a simple Grover's search, 
 | `src/quantum/gates.py` | Gate types and circuit API |
 | `OPTIMIZE.md` | Optimization workflow guide |
 | `benchmarks/` | Benchmark harness, profiler, SOTA comparison |
-| `docs/02-attempt-history.md` | Ledger of optimization attempts |
-| `docs/03-findings.md` | Validated conclusions |
+| `docs/02-attempt-history.md` | Experiment log |
 | `docs/progress-data.md` | Raw progress chart data |

@@ -143,11 +143,8 @@ After each iteration, update three things:
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
 | `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
 | `benchmarks/cases/` | Benchmark case definitions — do not modify |
-| `docs/02-attempt-history.md` | Canonical ledger of what was tried and what happened |
-| `docs/03-findings.md` | Stable validated conclusions |
-| `docs/04-roadmap.md` | Current hypotheses and priorities |
+| `docs/02-attempt-history.md` | Experiment log (what was tried, what worked, what didn't) |
 | `docs/progress-data.md` | Raw data for the progress chart |
-| `docs/10-hypotheses-post-sota-2026-02-11.md` | Latest hypothesis set with SOTA context |
 
 ## Anti-patterns
 
