@@ -750,32 +750,18 @@ class BatchedQuantumSystem:
 
         if k == 1:
             d0, d1 = complex(diagonal[0]), complex(diagonal[1])
-            t = targets[0]
-            a = 1 << t
-            b = 1 << (self.n_qubits - t - 1)
-            state = self.state_vectors.view(self.batch_size, a, 2, b)
-            self.state_vectors = torch.stack(
-                [d0 * state[:, :, 0, :], d1 * state[:, :, 1, :]], dim=2,
-            ).reshape(self.batch_size, -1)
+            mask = self._measurement_mask_for_qubit(targets[0])
+            factors = torch.where(mask, d1, d0)
+            self.state_vectors = self.state_vectors * factors.unsqueeze(0)
             return self
 
         if k == 2:
-            t0, t1 = targets
-            if t0 > t1:
-                t0, t1 = t1, t0
-                swap = [0, 2, 1, 3]
-                d = [complex(diagonal[swap[i]]) for i in range(4)]
-            else:
-                d = [complex(diagonal[i]) for i in range(4)]
-            a = 1 << t0
-            b = 1 << (t1 - t0 - 1)
-            c = 1 << (self.n_qubits - t1 - 1)
-            state = self.state_vectors.view(self.batch_size, a, 2, b, 2, c)
-            result = torch.stack([
-                torch.stack([d[0] * state[:, :, 0, :, 0, :], d[1] * state[:, :, 0, :, 1, :]], dim=3),
-                torch.stack([d[2] * state[:, :, 1, :, 0, :], d[3] * state[:, :, 1, :, 1, :]], dim=3),
-            ], dim=2)
-            self.state_vectors = result.reshape(self.batch_size, -1)
+            d = [complex(diagonal[i]) for i in range(4)]
+            subindex = self._diagonal_subindex_for_targets(targets)
+            factors = torch.where(subindex == 0, d[0],
+                      torch.where(subindex == 1, d[1],
+                      torch.where(subindex == 2, d[2], d[3])))
+            self.state_vectors = self.state_vectors * factors.unsqueeze(0)
             return self
 
         diagonal_device = self._device_gate_diagonal(diagonal)
