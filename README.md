@@ -103,6 +103,8 @@ Latest full benchmark artifact:
 
 ![Optimization progress (single panel)](docs/images/optimization-progress-core6-single-panel.png)
 
+Raw data: `docs/optimization-progress-core6-single-panel-data.md`.
+
 Progress summary:
 
 | Scope | Baseline | Latest | Speedup |
