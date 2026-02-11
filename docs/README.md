@@ -22,6 +22,8 @@ These docs are intentionally ordered as a single narrative:
    - Design + implementation notes for apples-to-apples benchmark comparison against external SOTA simulators.
 10. `docs/10-hypotheses-post-sota-2026-02-11.md`
    - Updated hypothesis set after full SOTA comparison, including explicit deltas vs `docs/08`.
+11. `docs/11-design-h3-compiled-dynamic-graph.md`
+   - Graph-based dynamic executor design and implementation notes (edge/node model, current limits, and next-pass plan).
 
 Rules:
 
