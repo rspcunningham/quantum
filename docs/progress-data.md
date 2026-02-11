@@ -1,8 +1,8 @@
-# Optimization Progress Single-Panel Raw Data (Core-6)
+# Optimization Progress Raw Data (Core-6)
 
 This file contains all points used to generate:
 
-- `docs/images/optimization-progress-core6-single-panel.png`
+- `docs/images/progress.png`
 
 Data source files are in `benchmarks/results/` and are listed below in plotting order.
 

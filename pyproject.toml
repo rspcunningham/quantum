@@ -18,7 +18,6 @@ dependencies = [
 
 [project.scripts]
 bench = "benchmarks.run:main"
-bench-plot = "benchmarks.plot:main"
 bench-trace = "benchmarks.trace:main"
 bench-compare = "benchmarks.compare:main"
 bench-compare-report = "benchmarks.compare_report:main"
