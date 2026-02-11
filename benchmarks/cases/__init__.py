@@ -45,6 +45,8 @@ from benchmarks.cases.synthetic_expanded import (
     adaptive_feedback_5q,
 )
 
+from benchmarks.cases.qasm_loader import discover_qasm_cases
+
 ALL_CASES: list[Callable[[], BenchmarkCase]] = [
     bell_state,
     simple_grovers,
@@ -71,3 +73,5 @@ ALL_CASES: list[Callable[[], BenchmarkCase]] = [
     diagonal_mesh_15,
     adaptive_feedback_5q,
 ]
+
+ALL_CASES.extend(discover_qasm_cases())

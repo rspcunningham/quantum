@@ -35,6 +35,10 @@ def infer_resources(circuit: Circuit) -> tuple[int, int]:
                 for target in op.gate.targets:
                     if target > max_qubit:
                         max_qubit = target
+                if op.condition > 0:
+                    needed_bits = op.condition.bit_length()
+                    if needed_bits - 1 > max_bit:
+                        max_bit = needed_bits - 1
 
     _walk(circuit.operations)
     return (max_qubit + 1, max_bit + 1)
