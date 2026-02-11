@@ -2,6 +2,7 @@
 
 This plan is based on the completed attempt history in `docs/02-attempt-history.md`.
 Latest assessment context: `docs/06-assessment-hypotheses-2026-02-11.md`.
+Post-SOTA hypothesis refresh: `docs/10-hypotheses-post-sota-2026-02-11.md`.
 
 ## Objective
 
@@ -62,6 +63,8 @@ Target adaptive-feedback bottlenecks:
 - avoid expensive boolean advanced indexing restore patterns
 - evaluate branch-group/shot-branching execution (group state vectors by classical condition path)
 
+Implementation design: `docs/08-design-h1-dynamic-branch-engine.md`.
+
 Expected impact: high on current post-H0 totals because adaptive-feedback workloads now dominate suite runtime.
 
 ### H2. Execution-Plan Compilation (Circuit IR)
@@ -100,6 +103,16 @@ Expected impact: moderate on remaining dense/permutation-heavy one-shot hotspots
 Investigate application path for high-qubit cases that currently fail due tensor rank >16 on MPS.
 
 Expected impact: expands runnable benchmark space; correctness/coverage improvement rather than raw speedup.
+
+## External Baseline Harness
+
+The apples-to-apples external SOTA comparison harness is implemented and documented in:
+`docs/09-design-sota-comparison-harness.md`.
+
+Latest comparison artifacts:
+
+- `benchmarks/results/compare-2026-02-11T005222.jsonl` (full: native vs Aer)
+- `benchmarks/results/compare-2026-02-11T005251.jsonl` (static: native vs Aer vs qsim)
 
 ## Validation Protocol
 
