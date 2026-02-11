@@ -67,6 +67,8 @@ class BatchedQuantumSystem:
     _measurement_masks: dict[int, torch.Tensor]
     _measurement_weights: dict[int, torch.Tensor]
     _gate_tensors: dict[int, torch.Tensor]
+    _gate_diagonals: dict[int, torch.Tensor]
+    _diagonal_subindices: dict[tuple[int, ...], torch.Tensor]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
@@ -76,6 +78,8 @@ class BatchedQuantumSystem:
         self._measurement_masks = {}
         self._measurement_weights = {}
         self._gate_tensors = {}
+        self._gate_diagonals = {}
+        self._diagonal_subindices = {}
 
         # Initialize all state vectors to |000...0⟩
         # Shape: (batch_size, 2^n_qubits) - each row is a state vector
@@ -95,6 +99,9 @@ class BatchedQuantumSystem:
         a single matmul.  No Kronecker products, no swap matrices.
         O(2^n) per gate instead of O(4^n).
         """
+        if gate.diagonal is not None:
+            return self._apply_diagonal_gate(gate)
+
         targets = gate.targets
         tensor = self._device_gate_tensor(gate.tensor)
         k = len(targets)
@@ -122,6 +129,21 @@ class BatchedQuantumSystem:
         state = state.permute(inv_perm)
 
         self.state_vectors = state.reshape(self.batch_size, -1)
+        return self
+
+    def _apply_diagonal_gate(self, gate: Gate) -> "BatchedQuantumSystem":
+        """Apply a diagonal gate via elementwise multiplication."""
+        diagonal = gate.diagonal
+        assert diagonal is not None
+
+        diagonal_device = self._device_gate_diagonal(diagonal)
+        targets = tuple(gate.targets)
+        subindex = self._diagonal_subindex_for_targets(targets)
+
+        # Each basis amplitude is scaled by the gate diagonal entry selected
+        # from the target-qubit bit pattern for that basis state.
+        factors = diagonal_device[subindex]  # (2^n,)
+        self.state_vectors = self.state_vectors * factors.unsqueeze(0)
         return self
 
     @torch.inference_mode()
@@ -190,6 +212,40 @@ class BatchedQuantumSystem:
         moved = tensor.to(self.device)
         self._gate_tensors[key] = moved
         return moved
+
+    def _device_gate_diagonal(self, diagonal: torch.Tensor) -> torch.Tensor:
+        """Cache gate diagonals on device."""
+        key = id(diagonal)
+        cached = self._gate_diagonals.get(key)
+        if cached is not None:
+            return cached
+
+        if diagonal.device == self.device:
+            self._gate_diagonals[key] = diagonal
+            return diagonal
+
+        moved = diagonal.to(self.device)
+        self._gate_diagonals[key] = moved
+        return moved
+
+    def _diagonal_subindex_for_targets(self, targets: tuple[int, ...]) -> torch.Tensor:
+        """Map basis indices to diagonal-entry indices for target qubits."""
+        cached = self._diagonal_subindices.get(targets)
+        if cached is not None:
+            return cached
+
+        indices = torch.arange(1 << self.n_qubits, device=self.device, dtype=torch.int64)
+        subindex = torch.zeros_like(indices)
+        k = len(targets)
+
+        # The first target is the most significant bit in the gate basis index.
+        for out_pos, target in enumerate(targets):
+            bitpos = self.n_qubits - 1 - target
+            bit = (indices >> bitpos) & 1
+            subindex = subindex | (bit << (k - out_pos - 1))
+
+        self._diagonal_subindices[targets] = subindex
+        return subindex
 
     @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "BatchedQuantumSystem":
