@@ -64,12 +64,14 @@ class BatchedQuantumSystem:
     n_bits: int
     batch_size: int
     device: torch.device
+    _measurement_masks: dict[int, torch.Tensor]
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
         self.n_bits = n_bits
         self.batch_size = batch_size
         self.device = device
+        self._measurement_masks = {}
 
         # Initialize all state vectors to |000...0⟩
         # Shape: (batch_size, 2^n_qubits) - each row is a state vector
@@ -127,34 +129,38 @@ class BatchedQuantumSystem:
         qubit = measurement.qubit
         bit = measurement.bit
 
-        bitpos = self.n_qubits - 1 - qubit
-
-        # Get probabilities for all batches
-        indices = torch.arange(1 << self.n_qubits, device=self.device)
-        mask_1 = ((indices >> bitpos) & 1).bool()
+        mask_1 = self._measurement_mask_for_qubit(qubit)
 
         probs = torch.abs(self.state_vectors) ** 2  # (batch_size, 2^n)
-        p1 = probs[:, mask_1].sum(dim=1)  # (batch_size,)
+        p1 = probs[:, mask_1].sum(dim=1).clamp(0.0, 1.0)  # (batch_size,)
 
         # Sample outcomes for all batches at once
-        outcomes = (torch.rand(self.batch_size, device=self.device) < p1).int()  # (batch_size,)
+        outcomes = (torch.rand(self.batch_size, device=self.device) < p1).to(torch.int32)  # (batch_size,)
 
         # Store outcomes in bit registers
         self.bit_registers[:, bit] = outcomes
 
-        # Apply projection to each state vector based on its outcome
-        # TODO: This loop could potentially be vectorized further
-        for i in range(self.batch_size):
-            outcome = int(outcomes[i].item())
-            P = torch.tensor([[1 - outcome, 0], [0, outcome]], dtype=torch.complex64, device=self.device)
-            P_full = self._gate_to_qubit(P, n_targets=1, offset=qubit)
+        # Vectorized projection:
+        # keep amplitudes where basis qubit value matches each sample's outcome.
+        keep = mask_1.unsqueeze(0) == outcomes.unsqueeze(1).bool()  # (batch_size, 2^n)
+        self.state_vectors = self.state_vectors * keep
 
-            # P_full @ state_vector[i] is equivalent to state_vector[i] @ P_full.T
-            self.state_vectors[i] = self.state_vectors[i] @ P_full.T
-            norm = torch.sqrt(torch.sum(torch.abs(self.state_vectors[i]) ** 2))
-            self.state_vectors[i] = self.state_vectors[i] / norm
+        norms = torch.sqrt((torch.abs(self.state_vectors) ** 2).sum(dim=1, keepdim=True))
+        self.state_vectors = self.state_vectors / norms.clamp_min(1e-12)
 
         return self
+
+    def _measurement_mask_for_qubit(self, qubit: int) -> torch.Tensor:
+        """Basis-state mask where `qubit` is in state |1>."""
+        mask = self._measurement_masks.get(qubit)
+        if mask is not None:
+            return mask
+
+        bitpos = self.n_qubits - 1 - qubit
+        indices = torch.arange(1 << self.n_qubits, device=self.device)
+        mask = ((indices >> bitpos) & 1).bool()
+        self._measurement_masks[qubit] = mask
+        return mask
 
     @torch.inference_mode()
     def apply_one(self, operation: Gate | Measurement | ConditionalGate) -> "BatchedQuantumSystem":
