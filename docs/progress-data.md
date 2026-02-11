@@ -2,7 +2,7 @@
 
 This file contains all points used to generate:
 
-- `docs/images/progress.png`
+- `docs/progress.png`
 
 Data source files are in `benchmarks/results/` and are listed below in plotting order.
 

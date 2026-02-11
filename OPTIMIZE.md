@@ -119,7 +119,7 @@ After each iteration, update three things:
 
 **b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md` with the core-6 totals from the new benchmark run. The core-6 cases are: `bell_state`, `simple_grovers`, `real_grovers`, `ghz_state`, `qft`, `teleportation`. Extract their per-shot-count totals from the JSONL and add a new row. Update the `annotation` on the previous "Current" row to blank and mark the new row as "Current".
 
-**c) Progress chart** — first, **read the existing `docs/images/progress.png`** to see what the current chart looks like. Then regenerate it from the updated `docs/progress-data.md`. Write a one-off Python script that reads the table, plots the series (log-scale Y, one line per shot count), and saves the PNG. Use `matplotlib` (available in the project venv). Don't commit the script — just run it ephemerally and commit the resulting image. After generating, **read the new image** to verify it looks correct and to inform your next hypothesis — the shape of the curves tells you where the remaining headroom is.
+**c) Progress chart** — first, **read the existing `docs/progress.png`** to see what the current chart looks like. Then regenerate it from the updated `docs/progress-data.md`. Write a one-off Python script that reads the table, plots the series (log-scale Y, one line per shot count), and saves the PNG. Use `matplotlib` (available in the project venv). Don't commit the script — just run it ephemerally and commit the resulting image. After generating, **read the new image** to verify it looks correct and to inform your next hypothesis — the shape of the curves tells you where the remaining headroom is.
 
 ## Interpreting results
 

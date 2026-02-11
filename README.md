@@ -2,7 +2,7 @@
 
 A state-vector quantum circuit simulator built from scratch with PyTorch, targeting Apple Silicon (MPS) as a first-class backend.
 
-![Optimization progress](docs/images/progress.png)
+![Optimization progress](docs/progress.png)
 
 | Scope | Baseline | Latest | Speedup |
 |---|---:|---:|---:|
