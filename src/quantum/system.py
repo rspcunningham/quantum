@@ -312,6 +312,91 @@ def _fuse_segment_permutations(gates: tuple[Gate, ...], n_qubits: int) -> tuple[
     return tuple(result)
 
 
+def _compile_segment_scalars(
+    gates: tuple[Gate, ...],
+    n_qubits: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]] | None:
+    """Pre-extract gate scalars into a single device-resident tensor.
+
+    Eliminates per-gate scalar_tensor → copy_ overhead on MPS by batching all
+    scalar CPU→device transfers into one call at compile time.
+
+    Returns ``(buffer, offsets, alpha_lists)`` or ``None`` if no scalars to cache.
+    For gate *i*:
+    - ``offsets[i] >= 0``: index into *buffer* for the gate's first cached scalar.
+    - ``offsets[i] == -1``: not cached; fall back to ``apply_gate``.
+    - ``alpha_lists[i]``: Python complex scalars for ``add_(alpha=)`` calls.
+    """
+    scalars: list[complex] = []
+    offsets: list[int] = []
+    alpha_lists: list[tuple[complex, ...]] = []
+
+    for gate in gates:
+        if gate.diagonal is not None:
+            targets = tuple(gate.targets)
+            k = len(targets)
+            if k == 1:
+                offset = len(scalars)
+                offsets.append(offset)
+                scalars.append(complex(gate.diagonal[0]))
+                scalars.append(complex(gate.diagonal[1]))
+                alpha_lists.append(())
+            elif k == 2:
+                offset = len(scalars)
+                offsets.append(offset)
+                d = [complex(gate.diagonal[i]) for i in range(4)]
+                t0, t1 = targets
+                if t0 > t1:
+                    d[1], d[2] = d[2], d[1]
+                scalars.extend(d)
+                alpha_lists.append(())
+            else:
+                # Full-state (k == n_qubits) or k > 2: different code path
+                offsets.append(-1)
+                alpha_lists.append(())
+        elif gate.permutation is not None:
+            offsets.append(-1)
+            alpha_lists.append(())
+        else:
+            # Dense gate
+            targets = tuple(gate.targets)
+            k = len(targets)
+            if k == 1:
+                offset = len(scalars)
+                offsets.append(offset)
+                g = gate.tensor.reshape(2, 2)
+                g00 = complex(g[0, 0])
+                g01 = complex(g[0, 1])
+                g10 = complex(g[1, 0])
+                g11 = complex(g[1, 1])
+                scalars.extend([g00, g10])
+                alpha_lists.append((g01, g11))
+            elif k == 2:
+                offset = len(scalars)
+                offsets.append(offset)
+                g = gate.tensor.reshape(4, 4)
+                t0, t1 = targets
+                if t0 > t1:
+                    perm = [0, 2, 1, 3]
+                    r = [[complex(g[perm[i], perm[j]]) for j in range(4)] for i in range(4)]
+                else:
+                    r = [[complex(g[i, j]) for j in range(4)] for i in range(4)]
+                for i in range(4):
+                    scalars.append(r[i][0])
+                alphas = tuple(r[i][j] for i in range(4) for j in range(1, 4))
+                alpha_lists.append(alphas)
+            else:
+                offsets.append(-1)
+                alpha_lists.append(())
+
+    if not scalars:
+        return None
+
+    buffer = torch.tensor(scalars, dtype=torch.complex64, device=device)
+    return buffer, tuple(offsets), tuple(alpha_lists)
+
+
 def _set_classical_bit(value: int, *, bit: int, outcome: int, n_bits: int) -> int:
     """Overwrite one classical register bit in big-endian indexing."""
     if n_bits == 0:
@@ -516,6 +601,7 @@ def _advance_branches_with_gate_sequence(
     gates: tuple[Gate, ...],
     add_state: Callable[[torch.Tensor], int],
     condition: int | None,
+    scalar_cache: tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]] | None = None,
 ) -> dict[tuple[int, int], int]:
     """Advance branch states through a contiguous gate run."""
     transition_cache: dict[int, int] = {}
@@ -533,8 +619,13 @@ def _advance_branches_with_gate_sequence(
         next_state_id = transition_cache.get(state_id)
         if next_state_id is None:
             gate_system.state_vectors = state_arena[state_id]
-            for gate in gates:
-                _ = gate_system.apply_gate(gate)
+            if scalar_cache is not None:
+                buf, offsets, alphas = scalar_cache
+                for i, gate in enumerate(gates):
+                    gate_system._apply_gate_cached(gate, buf, offsets[i], alphas[i])
+            else:
+                for gate in gates:
+                    _ = gate_system.apply_gate(gate)
             next_state_id = add_state(gate_system.state_vectors)
             transition_cache[state_id] = next_state_id
 
@@ -715,6 +806,18 @@ def _run_compiled_simulation(
                         if gate._permutation_factors is not None:
                             gate._permutation_factors = gate._permutation_factors.to(device)
 
+    # Pre-cache gate scalars per segment to eliminate per-gate copy_ overhead.
+    # On MPS, only beneficial at ≥17 qubits where per-gate scalar_tensor → copy_
+    # overhead is significant. At 13-16q, MPS buffer allocation cost exceeds savings.
+    segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]] = {}
+    _cache_scalars = device.type != "mps" or n_qubits >= 17
+    if _cache_scalars:
+        for i, step in enumerate(compiled.steps):
+            if isinstance(step, (_DynamicSegmentStep, _DynamicConditionalStep)):
+                cache = _compile_segment_scalars(step.gates, n_qubits, device)
+                if cache is not None:
+                    segment_scalar_caches[i] = cache
+
     gate_system = BatchedQuantumSystem(
         n_qubits=n_qubits,
         n_bits=n_bits,
@@ -762,7 +865,7 @@ def _run_compiled_simulation(
             device=device,
         )
 
-    for step in compiled.steps:
+    for step_idx, step in enumerate(compiled.steps):
         if isinstance(step, _DynamicSegmentStep):
             branches = _advance_branches_with_gate_sequence(
                 branches=branches,
@@ -771,6 +874,7 @@ def _run_compiled_simulation(
                 gates=step.gates,
                 add_state=_add_state,
                 condition=None,
+                scalar_cache=segment_scalar_caches.get(step_idx),
             )
 
         elif isinstance(step, _DynamicConditionalStep):
@@ -781,6 +885,7 @@ def _run_compiled_simulation(
                 gates=step.gates,
                 add_state=_add_state,
                 condition=step.condition,
+                scalar_cache=segment_scalar_caches.get(step_idx),
             )
 
         else:
@@ -1015,6 +1120,86 @@ class BatchedQuantumSystem:
 
         self.state_vectors = state
         return self
+
+    def _apply_gate_cached(
+        self,
+        gate: Gate,
+        buf: torch.Tensor,
+        offset: int,
+        alphas: tuple[complex, ...],
+    ) -> None:
+        """Apply a gate using pre-cached device scalars (no scalar_tensor/copy_)."""
+        if offset < 0:
+            self.apply_gate(gate)
+            return
+
+        if gate.diagonal is not None:
+            targets = tuple(gate.targets)
+            k = len(targets)
+            if k == 1:
+                target = targets[0]
+                a = 1 << target
+                b = 1 << (self.n_qubits - target - 1)
+                state = self.state_vectors.view(self.batch_size, a, 2, b)
+                state[:, :, 0, :] *= buf[offset]
+                state[:, :, 1, :] *= buf[offset + 1]
+                return
+            if k == 2:
+                t0, t1 = targets
+                if t0 > t1:
+                    t0, t1 = t1, t0
+                a = 1 << t0
+                b = 1 << (t1 - t0 - 1)
+                c = 1 << (self.n_qubits - t1 - 1)
+                state = self.state_vectors.view(self.batch_size, a, 2, b, 2, c)
+                state[:, :, 0, :, 0, :] *= buf[offset]
+                state[:, :, 0, :, 1, :] *= buf[offset + 1]
+                state[:, :, 1, :, 0, :] *= buf[offset + 2]
+                state[:, :, 1, :, 1, :] *= buf[offset + 3]
+                return
+            self._apply_diagonal_gate(gate)
+            return
+
+        if gate.permutation is not None:
+            self._apply_permutation_gate(gate)
+            return
+
+        targets = tuple(gate.targets)
+        k = len(targets)
+        if k == 1:
+            target = targets[0]
+            a = 1 << target
+            b = 1 << (self.n_qubits - target - 1)
+            state = self.state_vectors.view(self.batch_size, a, 2, b)
+            s0 = state[:, :, 0, :]
+            s1 = state[:, :, 1, :]
+            new_0 = (s0 * buf[offset]).add_(s1, alpha=alphas[0])
+            new_1 = (s0 * buf[offset + 1]).add_(s1, alpha=alphas[1])
+            self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
+            return
+        if k == 2:
+            t0, t1 = targets
+            if t0 > t1:
+                t0, t1 = t1, t0
+            a = 1 << t0
+            b = 1 << (t1 - t0 - 1)
+            c = 1 << (self.n_qubits - t1 - 1)
+            state = self.state_vectors.view(self.batch_size, a, 2, b, 2, c)
+            s00 = state[:, :, 0, :, 0, :]
+            s01 = state[:, :, 0, :, 1, :]
+            s10 = state[:, :, 1, :, 0, :]
+            s11 = state[:, :, 1, :, 1, :]
+            out_00 = (s00 * buf[offset]).add_(s01, alpha=alphas[0]).add_(s10, alpha=alphas[1]).add_(s11, alpha=alphas[2])
+            out_01 = (s00 * buf[offset + 1]).add_(s01, alpha=alphas[3]).add_(s10, alpha=alphas[4]).add_(s11, alpha=alphas[5])
+            out_10 = (s00 * buf[offset + 2]).add_(s01, alpha=alphas[6]).add_(s10, alpha=alphas[7]).add_(s11, alpha=alphas[8])
+            out_11 = (s00 * buf[offset + 3]).add_(s01, alpha=alphas[9]).add_(s10, alpha=alphas[10]).add_(s11, alpha=alphas[11])
+            result = torch.stack([
+                torch.stack([out_00, out_01], dim=3),
+                torch.stack([out_10, out_11], dim=3),
+            ], dim=2)
+            self.state_vectors = result.reshape(self.batch_size, -1)
+            return
+        self.apply_gate(gate)
 
     @torch.inference_mode()
     def apply_measurement(self, measurement: Measurement) -> "BatchedQuantumSystem":
