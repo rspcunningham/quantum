@@ -1,0 +1,5 @@
+{
+  "expected": {},
+  "tolerance": 0.1,
+  "aer_shots": 100000
+}

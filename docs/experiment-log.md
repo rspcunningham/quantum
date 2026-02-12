@@ -4,7 +4,7 @@ Each row corresponds to a checkpoint in `docs/progress-data.md` (full-suite) or 
 
 Machine: Apple M1 Max, 32 GB. Backend: PyTorch MPS.
 
-Metric column: core-6 @1000 total for idx 0-24; full-suite @1000 total (complete cases) from idx 25 onward.
+Metric column: core-6 @1000 total for idx 0-24; full-suite @1000 total (complete cases) for idx 25-40; cold @1K / warm @10K totals from idx 41 onward.
 
 | idx | Commit | What changed | Metric @1000 | Verdict |
 |---:|---|---|---:|---|

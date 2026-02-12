@@ -1,0 +1,98 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.0497,
+      "10": 0.0393,
+      "100": 0.0383,
+      "1000": 0.0386,
+      "10000": 0.0408
+    },
+    "static": {
+      "1": 0.0497,
+      "10": 0.0393,
+      "100": 0.0383,
+      "1000": 0.0386,
+      "10000": 0.0408
+    },
+    "dynamic": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "random_universal_12",
+          "time_s": 0.0243,
+          "share_pct": 59.56,
+          "gates": 294,
+          "measurements": 12,
+          "conditional": 0
+        },
+        {
+          "case": "brickwork_entangler_15",
+          "time_s": 0.0165,
+          "share_pct": 40.44,
+          "gates": 394,
+          "measurements": 15,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "random_universal_12",
+          "proxy_time_s": 0.0233,
+          "case_time_s": 0.0243,
+          "op_count": 294,
+          "case_total_ops": 306
+        },
+        {
+          "op_kind": "gates",
+          "case": "brickwork_entangler_15",
+          "proxy_time_s": 0.0159,
+          "case_time_s": 0.0165,
+          "op_count": 394,
+          "case_total_ops": 409
+        },
+        {
+          "op_kind": "measurements",
+          "case": "random_universal_12",
+          "proxy_time_s": 0.001,
+          "case_time_s": 0.0243,
+          "op_count": 12,
+          "case_total_ops": 306
+        },
+        {
+          "op_kind": "measurements",
+          "case": "brickwork_entangler_15",
+          "proxy_time_s": 0.0006,
+          "case_time_s": 0.0165,
+          "op_count": 15,
+          "case_total_ops": 409
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [],
+      "operators_proxy": []
+    }
+  },
+  "counts": {
+    "cases_total": 2,
+    "cases_static": 2,
+    "cases_dynamic": 0
+  }
+}

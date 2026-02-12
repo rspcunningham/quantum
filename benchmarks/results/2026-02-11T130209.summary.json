@@ -1,0 +1,130 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.2239,
+      "10": 0.2157,
+      "100": 0.2138,
+      "1000": 0.2199,
+      "10000": 0.2217
+    },
+    "static": {
+      "1": 0.2239,
+      "10": 0.2157,
+      "100": 0.2138,
+      "1000": 0.2199,
+      "10000": 0.2217
+    },
+    "dynamic": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "diagonal_mesh_15",
+          "time_s": 0.0724,
+          "share_pct": 32.66,
+          "gates": 418,
+          "measurements": 15,
+          "conditional": 0
+        },
+        {
+          "case": "phase_ladder_13",
+          "time_s": 0.0589,
+          "share_pct": 26.57,
+          "gates": 586,
+          "measurements": 13,
+          "conditional": 0
+        },
+        {
+          "case": "random_universal_12",
+          "time_s": 0.0443,
+          "share_pct": 19.98,
+          "gates": 294,
+          "measurements": 12,
+          "conditional": 0
+        },
+        {
+          "case": "brickwork_entangler_15",
+          "time_s": 0.0366,
+          "share_pct": 16.51,
+          "gates": 394,
+          "measurements": 15,
+          "conditional": 0
+        },
+        {
+          "case": "qft",
+          "time_s": 0.0095,
+          "share_pct": 4.29,
+          "gates": 110,
+          "measurements": 10,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "diagonal_mesh_15",
+          "proxy_time_s": 0.0699,
+          "case_time_s": 0.0724,
+          "op_count": 418,
+          "case_total_ops": 433
+        },
+        {
+          "op_kind": "gates",
+          "case": "phase_ladder_13",
+          "proxy_time_s": 0.0576,
+          "case_time_s": 0.0589,
+          "op_count": 586,
+          "case_total_ops": 599
+        },
+        {
+          "op_kind": "gates",
+          "case": "random_universal_12",
+          "proxy_time_s": 0.0426,
+          "case_time_s": 0.0443,
+          "op_count": 294,
+          "case_total_ops": 306
+        },
+        {
+          "op_kind": "gates",
+          "case": "brickwork_entangler_15",
+          "proxy_time_s": 0.0353,
+          "case_time_s": 0.0366,
+          "op_count": 394,
+          "case_total_ops": 409
+        },
+        {
+          "op_kind": "gates",
+          "case": "qft",
+          "proxy_time_s": 0.0087,
+          "case_time_s": 0.0095,
+          "op_count": 110,
+          "case_total_ops": 120
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [],
+      "operators_proxy": []
+    }
+  },
+  "counts": {
+    "cases_total": 5,
+    "cases_static": 5,
+    "cases_dynamic": 0
+  }
+}

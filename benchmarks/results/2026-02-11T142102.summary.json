@@ -1,0 +1,114 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.073,
+      "10": 0.0694,
+      "100": 0.0712,
+      "1000": 0.0732,
+      "10000": 0.0747
+    },
+    "static": {
+      "1": 0.073,
+      "10": 0.0694,
+      "100": 0.0712,
+      "1000": 0.0732,
+      "10000": 0.0747
+    },
+    "dynamic": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "random_universal_14",
+          "time_s": 0.0279,
+          "share_pct": 37.35,
+          "gates": 384,
+          "measurements": 14,
+          "conditional": 0
+        },
+        {
+          "case": "brickwork_entangler_15",
+          "time_s": 0.027,
+          "share_pct": 36.14,
+          "gates": 394,
+          "measurements": 15,
+          "conditional": 0
+        },
+        {
+          "case": "real_grovers",
+          "time_s": 0.0198,
+          "share_pct": 26.51,
+          "gates": 180,
+          "measurements": 4,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "random_universal_14",
+          "proxy_time_s": 0.0269,
+          "case_time_s": 0.0279,
+          "op_count": 384,
+          "case_total_ops": 398
+        },
+        {
+          "op_kind": "gates",
+          "case": "brickwork_entangler_15",
+          "proxy_time_s": 0.026,
+          "case_time_s": 0.027,
+          "op_count": 394,
+          "case_total_ops": 409
+        },
+        {
+          "op_kind": "gates",
+          "case": "real_grovers",
+          "proxy_time_s": 0.0194,
+          "case_time_s": 0.0198,
+          "op_count": 180,
+          "case_total_ops": 184
+        },
+        {
+          "op_kind": "measurements",
+          "case": "brickwork_entangler_15",
+          "proxy_time_s": 0.001,
+          "case_time_s": 0.027,
+          "op_count": 15,
+          "case_total_ops": 409
+        },
+        {
+          "op_kind": "measurements",
+          "case": "random_universal_14",
+          "proxy_time_s": 0.001,
+          "case_time_s": 0.0279,
+          "op_count": 14,
+          "case_total_ops": 398
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [],
+      "operators_proxy": []
+    }
+  },
+  "counts": {
+    "cases_total": 3,
+    "cases_static": 3,
+    "cases_dynamic": 0
+  }
+}

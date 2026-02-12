@@ -1,0 +1,3 @@
+{"case": "bell_state", "n_qubits": 2, "times_s": {"1": 0.0066, "10": 0.0435, "100": 0.1867, "1000": 1.8364}, "correct": true}
+{"case": "simple_grovers", "n_qubits": 5, "times_s": {"1": 0.1486, "10": 0.3637, "100": 0.5628, "1000": 4.2575}, "correct": true}
+{"case": "real_grovers", "n_qubits": 13, "times_s": {"1": 135.867, "10": 139.142, "100": 174.768, "1000": 528.1955}, "correct": false}

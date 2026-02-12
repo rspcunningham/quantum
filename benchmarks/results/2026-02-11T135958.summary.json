@@ -1,0 +1,156 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.2836,
+      "10": 0.2994,
+      "100": 0.311,
+      "1000": 0.3164,
+      "10000": 0.3225
+    },
+    "static": {
+      "1": 0.2773,
+      "10": 0.271,
+      "100": 0.2716,
+      "1000": 0.277,
+      "10000": 0.2819
+    },
+    "dynamic": {
+      "1": 0.0063,
+      "10": 0.0284,
+      "100": 0.0394,
+      "1000": 0.0394,
+      "10000": 0.0406
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "random_universal_14",
+          "time_s": 0.2164,
+          "share_pct": 76.76,
+          "gates": 384,
+          "measurements": 14,
+          "conditional": 0
+        },
+        {
+          "case": "real_grovers",
+          "time_s": 0.0554,
+          "share_pct": 19.65,
+          "gates": 180,
+          "measurements": 4,
+          "conditional": 0
+        },
+        {
+          "case": "qft",
+          "time_s": 0.0097,
+          "share_pct": 3.44,
+          "gates": 110,
+          "measurements": 10,
+          "conditional": 0
+        },
+        {
+          "case": "bell_state",
+          "time_s": 0.0004,
+          "share_pct": 0.14,
+          "gates": 2,
+          "measurements": 2,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "random_universal_14",
+          "proxy_time_s": 0.2088,
+          "case_time_s": 0.2164,
+          "op_count": 384,
+          "case_total_ops": 398
+        },
+        {
+          "op_kind": "gates",
+          "case": "real_grovers",
+          "proxy_time_s": 0.0542,
+          "case_time_s": 0.0554,
+          "op_count": 180,
+          "case_total_ops": 184
+        },
+        {
+          "op_kind": "gates",
+          "case": "qft",
+          "proxy_time_s": 0.0089,
+          "case_time_s": 0.0097,
+          "op_count": 110,
+          "case_total_ops": 120
+        },
+        {
+          "op_kind": "measurements",
+          "case": "random_universal_14",
+          "proxy_time_s": 0.0076,
+          "case_time_s": 0.2164,
+          "op_count": 14,
+          "case_total_ops": 398
+        },
+        {
+          "op_kind": "measurements",
+          "case": "real_grovers",
+          "proxy_time_s": 0.0012,
+          "case_time_s": 0.0554,
+          "op_count": 4,
+          "case_total_ops": 184
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [
+        {
+          "case": "adaptive_feedback_120",
+          "time_s": 0.0406,
+          "share_pct": 100.0,
+          "gates": 120,
+          "measurements": 121,
+          "conditional": 360
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "conditional",
+          "case": "adaptive_feedback_120",
+          "proxy_time_s": 0.0243,
+          "case_time_s": 0.0406,
+          "op_count": 360,
+          "case_total_ops": 601
+        },
+        {
+          "op_kind": "measurements",
+          "case": "adaptive_feedback_120",
+          "proxy_time_s": 0.0082,
+          "case_time_s": 0.0406,
+          "op_count": 121,
+          "case_total_ops": 601
+        },
+        {
+          "op_kind": "gates",
+          "case": "adaptive_feedback_120",
+          "proxy_time_s": 0.0081,
+          "case_time_s": 0.0406,
+          "op_count": 120,
+          "case_total_ops": 601
+        }
+      ]
+    }
+  },
+  "counts": {
+    "cases_total": 5,
+    "cases_static": 4,
+    "cases_dynamic": 1
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.0345,
+      "10": 0.0324,
+      "100": 0.0277,
+      "1000": 0.0391,
+      "10000": 0.0918
+    },
+    "static": {
+      "1": 0.0341,
+      "10": 0.0318,
+      "100": 0.0272,
+      "1000": 0.0386,
+      "10000": 0.0913
+    },
+    "dynamic": {
+      "1": 0.0004,
+      "10": 0.0006,
+      "100": 0.0005,
+      "1000": 0.0005,
+      "10000": 0.0005
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "real_grovers",
+          "time_s": 0.082,
+          "share_pct": 89.81,
+          "gates": 180,
+          "measurements": 4,
+          "conditional": 0
+        },
+        {
+          "case": "qft",
+          "time_s": 0.0045,
+          "share_pct": 4.93,
+          "gates": 110,
+          "measurements": 10,
+          "conditional": 0
+        },
+        {
+          "case": "ghz_state",
+          "time_s": 0.003,
+          "share_pct": 3.29,
+          "gates": 12,
+          "measurements": 12,
+          "conditional": 0
+        },
+        {
+          "case": "simple_grovers",
+          "time_s": 0.0014,
+          "share_pct": 1.53,
+          "gates": 60,
+          "measurements": 4,
+          "conditional": 0
+        },
+        {
+          "case": "bell_state",
+          "time_s": 0.0004,
+          "share_pct": 0.44,
+          "gates": 2,
+          "measurements": 2,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "real_grovers",
+          "proxy_time_s": 0.0802,
+          "case_time_s": 0.082,
+          "op_count": 180,
+          "case_total_ops": 184
+        },
+        {
+          "op_kind": "gates",
+          "case": "qft",
+          "proxy_time_s": 0.0041,
+          "case_time_s": 0.0045,
+          "op_count": 110,
+          "case_total_ops": 120
+        },
+        {
+          "op_kind": "measurements",
+          "case": "real_grovers",
+          "proxy_time_s": 0.0018,
+          "case_time_s": 0.082,
+          "op_count": 4,
+          "case_total_ops": 184
+        },
+        {
+          "op_kind": "gates",
+          "case": "ghz_state",
+          "proxy_time_s": 0.0015,
+          "case_time_s": 0.003,
+          "op_count": 12,
+          "case_total_ops": 24
+        },
+        {
+          "op_kind": "measurements",
+          "case": "ghz_state",
+          "proxy_time_s": 0.0015,
+          "case_time_s": 0.003,
+          "op_count": 12,
+          "case_total_ops": 24
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [
+        {
+          "case": "teleportation",
+          "time_s": 0.0005,
+          "share_pct": 100.0,
+          "gates": 5,
+          "measurements": 3,
+          "conditional": 4
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "teleportation",
+          "proxy_time_s": 0.0002,
+          "case_time_s": 0.0005,
+          "op_count": 5,
+          "case_total_ops": 12
+        },
+        {
+          "op_kind": "conditional",
+          "case": "teleportation",
+          "proxy_time_s": 0.0002,
+          "case_time_s": 0.0005,
+          "op_count": 4,
+          "case_total_ops": 12
+        },
+        {
+          "op_kind": "measurements",
+          "case": "teleportation",
+          "proxy_time_s": 0.0001,
+          "case_time_s": 0.0005,
+          "op_count": 3,
+          "case_total_ops": 12
+        }
+      ]
+    }
+  },
+  "counts": {
+    "cases_total": 6,
+    "cases_complete": 6,
+    "cases_aborted": 0,
+    "cases_static": 5,
+    "cases_dynamic": 1
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.0102,
+      "10": 0.0304,
+      "100": 0.0421,
+      "1000": 0.0448,
+      "10000": 0.0463
+    },
+    "static": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    },
+    "dynamic": {
+      "1": 0.0102,
+      "10": 0.0304,
+      "100": 0.0421,
+      "1000": 0.0448,
+      "10000": 0.0463
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [],
+      "operators_proxy": []
+    },
+    "dynamic": {
+      "cases": [
+        {
+          "case": "conditional_rotation_3",
+          "time_s": 0.0225,
+          "share_pct": 48.6,
+          "gates": 40,
+          "measurements": 21,
+          "conditional": 60
+        },
+        {
+          "case": "adaptive_scaled_3q_80r",
+          "time_s": 0.0217,
+          "share_pct": 46.87,
+          "gates": 240,
+          "measurements": 81,
+          "conditional": 80
+        },
+        {
+          "case": "repeat_until_success_2q_10r",
+          "time_s": 0.0021,
+          "share_pct": 4.54,
+          "gates": 10,
+          "measurements": 11,
+          "conditional": 10
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "adaptive_scaled_3q_80r",
+          "proxy_time_s": 0.013,
+          "case_time_s": 0.0217,
+          "op_count": 240,
+          "case_total_ops": 401
+        },
+        {
+          "op_kind": "conditional",
+          "case": "conditional_rotation_3",
+          "proxy_time_s": 0.0112,
+          "case_time_s": 0.0225,
+          "op_count": 60,
+          "case_total_ops": 121
+        },
+        {
+          "op_kind": "gates",
+          "case": "conditional_rotation_3",
+          "proxy_time_s": 0.0074,
+          "case_time_s": 0.0225,
+          "op_count": 40,
+          "case_total_ops": 121
+        },
+        {
+          "op_kind": "measurements",
+          "case": "adaptive_scaled_3q_80r",
+          "proxy_time_s": 0.0044,
+          "case_time_s": 0.0217,
+          "op_count": 81,
+          "case_total_ops": 401
+        },
+        {
+          "op_kind": "conditional",
+          "case": "adaptive_scaled_3q_80r",
+          "proxy_time_s": 0.0043,
+          "case_time_s": 0.0217,
+          "op_count": 80,
+          "case_total_ops": 401
+        }
+      ]
+    }
+  },
+  "counts": {
+    "cases_total": 3,
+    "cases_static": 0,
+    "cases_dynamic": 3
+  }
+}

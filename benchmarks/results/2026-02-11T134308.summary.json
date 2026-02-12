@@ -1,0 +1,122 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.0342,
+      "10": 0.0332,
+      "100": 0.0311,
+      "1000": 0.0297,
+      "10000": 0.0334
+    },
+    "static": {
+      "1": 0.0342,
+      "10": 0.0332,
+      "100": 0.0311,
+      "1000": 0.0297,
+      "10000": 0.0334
+    },
+    "dynamic": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "real_grovers",
+          "time_s": 0.0173,
+          "share_pct": 51.8,
+          "gates": 180,
+          "measurements": 4,
+          "conditional": 0
+        },
+        {
+          "case": "qft",
+          "time_s": 0.0086,
+          "share_pct": 25.75,
+          "gates": 110,
+          "measurements": 10,
+          "conditional": 0
+        },
+        {
+          "case": "simple_grovers",
+          "time_s": 0.0059,
+          "share_pct": 17.66,
+          "gates": 60,
+          "measurements": 4,
+          "conditional": 0
+        },
+        {
+          "case": "bell_state",
+          "time_s": 0.0016,
+          "share_pct": 4.79,
+          "gates": 2,
+          "measurements": 2,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "real_grovers",
+          "proxy_time_s": 0.0169,
+          "case_time_s": 0.0173,
+          "op_count": 180,
+          "case_total_ops": 184
+        },
+        {
+          "op_kind": "gates",
+          "case": "qft",
+          "proxy_time_s": 0.0079,
+          "case_time_s": 0.0086,
+          "op_count": 110,
+          "case_total_ops": 120
+        },
+        {
+          "op_kind": "gates",
+          "case": "simple_grovers",
+          "proxy_time_s": 0.0055,
+          "case_time_s": 0.0059,
+          "op_count": 60,
+          "case_total_ops": 64
+        },
+        {
+          "op_kind": "gates",
+          "case": "bell_state",
+          "proxy_time_s": 0.0008,
+          "case_time_s": 0.0016,
+          "op_count": 2,
+          "case_total_ops": 4
+        },
+        {
+          "op_kind": "measurements",
+          "case": "bell_state",
+          "proxy_time_s": 0.0008,
+          "case_time_s": 0.0016,
+          "op_count": 2,
+          "case_total_ops": 4
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [],
+      "operators_proxy": []
+    }
+  },
+  "counts": {
+    "cases_total": 4,
+    "cases_static": 4,
+    "cases_dynamic": 0
+  }
+}

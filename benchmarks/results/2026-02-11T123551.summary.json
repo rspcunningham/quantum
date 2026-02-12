@@ -1,0 +1,204 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 3.5326,
+      "10": 4.422,
+      "100": 4.5911,
+      "1000": 4.6479,
+      "10000": 4.7043
+    },
+    "static": {
+      "1": 3.287,
+      "10": 3.2599,
+      "100": 3.226,
+      "1000": 3.2319,
+      "10000": 3.248
+    },
+    "dynamic": {
+      "1": 0.2456,
+      "10": 1.1621,
+      "100": 1.3651,
+      "1000": 1.416,
+      "10000": 1.4563
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "phase_ladder_13",
+          "time_s": 1.0314,
+          "share_pct": 31.75,
+          "gates": 586,
+          "measurements": 13,
+          "conditional": 0
+        },
+        {
+          "case": "phase_ladder",
+          "time_s": 0.6507,
+          "share_pct": 20.03,
+          "gates": 382,
+          "measurements": 11,
+          "conditional": 0
+        },
+        {
+          "case": "diagonal_mesh_15",
+          "time_s": 0.5342,
+          "share_pct": 16.45,
+          "gates": 418,
+          "measurements": 15,
+          "conditional": 0
+        },
+        {
+          "case": "qft_14",
+          "time_s": 0.3971,
+          "share_pct": 12.23,
+          "gates": 210,
+          "measurements": 14,
+          "conditional": 0
+        },
+        {
+          "case": "qft_12",
+          "time_s": 0.2763,
+          "share_pct": 8.51,
+          "gates": 156,
+          "measurements": 12,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "phase_ladder_13",
+          "proxy_time_s": 1.009,
+          "case_time_s": 1.0314,
+          "op_count": 586,
+          "case_total_ops": 599
+        },
+        {
+          "op_kind": "gates",
+          "case": "phase_ladder",
+          "proxy_time_s": 0.6325,
+          "case_time_s": 0.6507,
+          "op_count": 382,
+          "case_total_ops": 393
+        },
+        {
+          "op_kind": "gates",
+          "case": "diagonal_mesh_15",
+          "proxy_time_s": 0.5157,
+          "case_time_s": 0.5342,
+          "op_count": 418,
+          "case_total_ops": 433
+        },
+        {
+          "op_kind": "gates",
+          "case": "qft_14",
+          "proxy_time_s": 0.3723,
+          "case_time_s": 0.3971,
+          "op_count": 210,
+          "case_total_ops": 224
+        },
+        {
+          "op_kind": "gates",
+          "case": "qft_12",
+          "proxy_time_s": 0.2566,
+          "case_time_s": 0.2763,
+          "op_count": 156,
+          "case_total_ops": 168
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [
+        {
+          "case": "adaptive_feedback_120",
+          "time_s": 0.7958,
+          "share_pct": 54.65,
+          "gates": 120,
+          "measurements": 121,
+          "conditional": 360
+        },
+        {
+          "case": "adaptive_feedback_5q",
+          "time_s": 0.3558,
+          "share_pct": 24.43,
+          "gates": 50,
+          "measurements": 51,
+          "conditional": 550
+        },
+        {
+          "case": "adaptive_feedback",
+          "time_s": 0.2952,
+          "share_pct": 20.27,
+          "gates": 40,
+          "measurements": 41,
+          "conditional": 120
+        },
+        {
+          "case": "teleportation",
+          "time_s": 0.0095,
+          "share_pct": 0.65,
+          "gates": 5,
+          "measurements": 3,
+          "conditional": 4
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "conditional",
+          "case": "adaptive_feedback_120",
+          "proxy_time_s": 0.4767,
+          "case_time_s": 0.7958,
+          "op_count": 360,
+          "case_total_ops": 601
+        },
+        {
+          "op_kind": "conditional",
+          "case": "adaptive_feedback_5q",
+          "proxy_time_s": 0.3006,
+          "case_time_s": 0.3558,
+          "op_count": 550,
+          "case_total_ops": 651
+        },
+        {
+          "op_kind": "conditional",
+          "case": "adaptive_feedback",
+          "proxy_time_s": 0.1762,
+          "case_time_s": 0.2952,
+          "op_count": 120,
+          "case_total_ops": 201
+        },
+        {
+          "op_kind": "measurements",
+          "case": "adaptive_feedback_120",
+          "proxy_time_s": 0.1602,
+          "case_time_s": 0.7958,
+          "op_count": 121,
+          "case_total_ops": 601
+        },
+        {
+          "op_kind": "gates",
+          "case": "adaptive_feedback_120",
+          "proxy_time_s": 0.1589,
+          "case_time_s": 0.7958,
+          "op_count": 120,
+          "case_total_ops": 601
+        }
+      ]
+    }
+  },
+  "counts": {
+    "cases_total": 24,
+    "cases_static": 20,
+    "cases_dynamic": 4
+  }
+}

@@ -8,13 +8,11 @@ Data source files are in `benchmarks/results/` and are listed below in plotting 
 
 ## Cases Included
 
-All benchmark cases (24 hand-coded + 132 QASM-loaded). Cases that OOM are excluded from totals — only cases that complete all 5 shot counts are summed.
+All benchmark cases (hand-coded + QASM-loaded). Cases that OOM are excluded from totals — only cases that complete both shot counts are summed.
 
-## Plot Metadata
+## Era 1 — 5-shot ladder (idx 0-11)
 
-- Y-axis: log scale
-- Series: totals for shot counts `1`, `10`, `100`, `1000`, `10000`
-- `label_x`: exact x-axis text (`git_hash` + compact timestamp)
+Benchmark schedule: `[1, 10, 100, 1000, 10000]` with warmup call before shot ladder. All shots measured warm (cached).
 
 | idx | checkpoint_jsonl | git_hash | label_x | total_1_s | total_10_s | total_100_s | total_1000_s | total_10000_s | cases_complete |
 |---:|---|---|---|---:|---:|---:|---:|---:|---:|
@@ -31,21 +29,27 @@ All benchmark cases (24 hand-coded + 132 QASM-loaded). Cases that OOM are exclud
 | 10 | `2026-02-12T091156.jsonl` | `74183cf` | `74183cf\n02-12T0911` | 0.0187 | 0.0152 | 0.0194 | 0.0389 | 0.0629 | 156 |
 | 11 | `2026-02-12T091718.jsonl` | `751b889` | `751b889\n02-12T0917` | 0.0153 | 0.0123 | 0.0169 | 0.0377 | 0.0639 | 156 |
 
+## Era 2 — Cold/warm schedule (idx 12+)
+
+Benchmark schedule: cold @1K (cache cleared) + warm @10K per circuit. Two calls total.
+
+| idx | checkpoint_jsonl | git_hash | label_x | cold_1000_s | warm_10000_s | cases_complete |
+|---:|---|---|---|---:|---:|---:|
+| 12 | `2026-02-12T154156.jsonl` | `4ed771f` | `4ed771f\n02-12T1541` | 68.7304 | 0.1753 | 216 |
+
 ## SOTA Reference — Qiskit Aer (Full Suite)
 
-Horizontal reference lines for the progress chart. These are Aer's full-suite totals per shot count — a fixed target measured once. **Do not re-run** the comparison each iteration; just read the values below.
+Horizontal reference lines for the progress chart. These are Aer's full-suite totals — a fixed target measured once under the cold/warm schedule. **Do not re-run** the comparison each iteration; just read the values below.
 
-| shot_count | aer_total_s |
-|---:|---:|
-| 1 | null |
-| 10 | null |
-| 100 | null |
-| 1000 | null |
-| 10000 | null |
+| metric | aer_total_s |
+|---|---:|
+| cold_1000 | 135.0238 |
+| warm_10000 | 145.5009 |
 
 ## Notes
 
 - `null` means the checkpoint did not record that shot count for at least one case, or the SOTA comparison has not been run yet.
-- Cases that OOM at lower shot counts are excluded entirely from totals.
-- The `cases_complete` column tracks how many cases completed all 5 shot counts.
+- Cases that OOM are excluded entirely from totals.
+- The `cases_complete` column tracks how many cases completed both shot counts.
 - SOTA reference values of `null` mean the comparison has not been run yet. Once populated, they are plotted as horizontal dashed lines on `docs/progress.png`.
+- Era 1 data is preserved for historical context but uses a different methodology (all-warm, 5 shot counts). Direct comparison between eras is not meaningful.

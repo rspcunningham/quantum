@@ -1,0 +1,110 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.0005,
+      "10": 0.0006,
+      "100": 0.0006,
+      "1000": 0.0006,
+      "10000": 0.0009
+    },
+    "static": {
+      "1": 0.0002,
+      "10": 0.0001,
+      "100": 0.0001,
+      "1000": 0.0001,
+      "10000": 0.0004
+    },
+    "dynamic": {
+      "1": 0.0003,
+      "10": 0.0005,
+      "100": 0.0005,
+      "1000": 0.0005,
+      "10000": 0.0005
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "bell_state",
+          "time_s": 0.0004,
+          "share_pct": 100.0,
+          "gates": 2,
+          "measurements": 2,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "bell_state",
+          "proxy_time_s": 0.0002,
+          "case_time_s": 0.0004,
+          "op_count": 2,
+          "case_total_ops": 4
+        },
+        {
+          "op_kind": "measurements",
+          "case": "bell_state",
+          "proxy_time_s": 0.0002,
+          "case_time_s": 0.0004,
+          "op_count": 2,
+          "case_total_ops": 4
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [
+        {
+          "case": "teleportation",
+          "time_s": 0.0005,
+          "share_pct": 100.0,
+          "gates": 5,
+          "measurements": 3,
+          "conditional": 4
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "teleportation",
+          "proxy_time_s": 0.0002,
+          "case_time_s": 0.0005,
+          "op_count": 5,
+          "case_total_ops": 12
+        },
+        {
+          "op_kind": "conditional",
+          "case": "teleportation",
+          "proxy_time_s": 0.0002,
+          "case_time_s": 0.0005,
+          "op_count": 4,
+          "case_total_ops": 12
+        },
+        {
+          "op_kind": "measurements",
+          "case": "teleportation",
+          "proxy_time_s": 0.0001,
+          "case_time_s": 0.0005,
+          "op_count": 3,
+          "case_total_ops": 12
+        }
+      ]
+    }
+  },
+  "counts": {
+    "cases_total": 6,
+    "cases_complete": 2,
+    "cases_aborted": 4,
+    "cases_static": 1,
+    "cases_dynamic": 1
+  }
+}

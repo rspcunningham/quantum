@@ -1,0 +1,6 @@
+{"case": "bell_state", "n_qubits": 2, "times_s": {"1": 0.0068, "10": 0.0434, "100": 0.1811, "1000": 1.8279}, "correct": true}
+{"case": "simple_grovers", "n_qubits": 5, "times_s": {"1": 0.1465, "10": 0.2001, "100": 0.5572, "1000": 4.1918}, "correct": true}
+{"case": "real_grovers", "n_qubits": 13, "times_s": {"1": 140.3972, "10": 144.1618, "100": 181.171, "1000": 527.313}, "correct": true}
+{"case": "ghz_state", "n_qubits": 12, "times_s": {"1": 2.1582, "10": 3.6557, "100": 18.0828, "1000": 160.941}, "correct": true}
+{"case": "qft", "n_qubits": 10, "times_s": {"1": 7.6646, "10": 8.0854, "100": 9.2335, "1000": 21.9627}, "correct": true}
+{"case": "teleportation", "n_qubits": 3, "times_s": {"1": 0.0151, "10": 0.2238, "100": 1.318, "1000": 2.4404}, "correct": true}

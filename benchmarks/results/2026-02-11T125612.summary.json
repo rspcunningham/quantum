@@ -1,0 +1,114 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.0625,
+      "10": 0.0581,
+      "100": 0.0588,
+      "1000": 0.057,
+      "10000": 0.0581
+    },
+    "static": {
+      "1": 0.0625,
+      "10": 0.0581,
+      "100": 0.0588,
+      "1000": 0.057,
+      "10000": 0.0581
+    },
+    "dynamic": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "random_universal_12",
+          "time_s": 0.0226,
+          "share_pct": 38.9,
+          "gates": 294,
+          "measurements": 12,
+          "conditional": 0
+        },
+        {
+          "case": "clifford_scrambler_14",
+          "time_s": 0.0204,
+          "share_pct": 35.11,
+          "gates": 368,
+          "measurements": 14,
+          "conditional": 0
+        },
+        {
+          "case": "brickwork_entangler_15",
+          "time_s": 0.0151,
+          "share_pct": 25.99,
+          "gates": 394,
+          "measurements": 15,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "random_universal_12",
+          "proxy_time_s": 0.0217,
+          "case_time_s": 0.0226,
+          "op_count": 294,
+          "case_total_ops": 306
+        },
+        {
+          "op_kind": "gates",
+          "case": "clifford_scrambler_14",
+          "proxy_time_s": 0.0197,
+          "case_time_s": 0.0204,
+          "op_count": 368,
+          "case_total_ops": 382
+        },
+        {
+          "op_kind": "gates",
+          "case": "brickwork_entangler_15",
+          "proxy_time_s": 0.0145,
+          "case_time_s": 0.0151,
+          "op_count": 394,
+          "case_total_ops": 409
+        },
+        {
+          "op_kind": "measurements",
+          "case": "random_universal_12",
+          "proxy_time_s": 0.0009,
+          "case_time_s": 0.0226,
+          "op_count": 12,
+          "case_total_ops": 306
+        },
+        {
+          "op_kind": "measurements",
+          "case": "clifford_scrambler_14",
+          "proxy_time_s": 0.0007,
+          "case_time_s": 0.0204,
+          "op_count": 14,
+          "case_total_ops": 382
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [],
+      "operators_proxy": []
+    }
+  },
+  "counts": {
+    "cases_total": 3,
+    "cases_static": 3,
+    "cases_dynamic": 0
+  }
+}

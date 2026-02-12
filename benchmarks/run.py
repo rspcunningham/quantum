@@ -19,8 +19,9 @@ from benchmarks.cases import BenchmarkCase, ALL_CASES, CORE_CASES
 from benchmarks.ir import build_circuit_ir
 from quantum import run_simulation, infer_resources
 from quantum.gates import Gate, Measurement, ConditionalGate, Circuit
+from quantum.system import _circuit_compilation_cache
 
-SHOT_COUNTS = [1, 10, 100, 1000, 10000]
+SHOT_COUNTS = [1000, 10000]
 OP_KINDS = ("gates", "measurements", "conditional")
 
 
@@ -195,14 +196,16 @@ def _totals_for_rows(results: list[dict]) -> dict[str, float | None]:
 
 
 def _format_totals_line(totals: dict[str, float | None]) -> str:
+    labels = {SHOT_COUNTS[0]: "cold", **{s: "warm" for s in SHOT_COUNTS[1:]}}
     parts: list[str] = []
     for shot in SHOT_COUNTS:
         key = str(shot)
         value = totals.get(key)
+        label = labels[shot]
         if value is None:
-            parts.append(f"{shot} \u2192 n/a")
+            parts.append(f"{label}@{shot} \u2192 n/a")
         else:
-            parts.append(f"{shot} \u2192 {value:.2f}s")
+            parts.append(f"{label}@{shot} \u2192 {value:.2f}s")
     return "    ".join(parts)
 
 
@@ -311,49 +314,39 @@ def run_case(
     rss_before = get_process_rss_mb()
 
     if backend == "native":
-        # Warmup
-        try:
-            run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
-            sync_device(device)
-        except RuntimeError as error:
-            if is_oom_error(error):
-                abort_reason = f"OOM during warmup: {str(error).strip()}"
-                clear_device_cache(device)
-            else:
-                abort_reason = f"runtime error during warmup: {str(error).strip()}"
-        except Exception as error:
-            abort_reason = f"error during warmup: {str(error).strip()}"
+        for shot_idx, shots in enumerate(SHOT_COUNTS):
+            # Clear compilation cache before the first (cold) call
+            if shot_idx == 0:
+                _circuit_compilation_cache.pop(id(case.circuit), None)
 
-        if abort_reason is None:
-            for shots in SHOT_COUNTS:
-                try:
-                    sync_device(device)
-                    wall_start = time.perf_counter()
-                    cpu_start = time.process_time()
-                    result = run_simulation(case.circuit, shots, n_qubits=n_qubits, device=device)
-                    sync_device(device)
-                    wall_elapsed = time.perf_counter() - wall_start
-                    cpu_elapsed = time.process_time() - cpu_start
-                except RuntimeError as error:
-                    if is_oom_error(error):
-                        abort_reason = f"OOM at {shots} shots: {str(error).strip()}"
-                        clear_device_cache(device)
-                    else:
-                        abort_reason = f"runtime error at {shots} shots: {str(error).strip()}"
-                    break
-                except Exception as error:
-                    abort_reason = f"error at {shots} shots: {str(error).strip()}"
-                    break
+            try:
+                sync_device(device)
+                wall_start = time.perf_counter()
+                cpu_start = time.process_time()
+                result = run_simulation(case.circuit, shots, n_qubits=n_qubits, device=device)
+                sync_device(device)
+                wall_elapsed = time.perf_counter() - wall_start
+                cpu_elapsed = time.process_time() - cpu_start
+            except RuntimeError as error:
+                if is_oom_error(error):
+                    abort_reason = f"OOM at {shots} shots: {str(error).strip()}"
+                    clear_device_cache(device)
+                else:
+                    abort_reason = f"runtime error at {shots} shots: {str(error).strip()}"
+                break
+            except Exception as error:
+                abort_reason = f"error at {shots} shots: {str(error).strip()}"
+                break
 
-                times[str(shots)] = round(wall_elapsed, 4)
-                cpu_times[str(shots)] = round(cpu_elapsed, 4)
+            times[str(shots)] = round(wall_elapsed, 4)
+            cpu_times[str(shots)] = round(cpu_elapsed, 4)
 
-                if case_timeout is not None and wall_elapsed > case_timeout:
-                    abort_reason = f"timeout at {shots} shots ({wall_elapsed:.1f}s > {case_timeout:.0f}s)"
-                    break
+            if case_timeout is not None and wall_elapsed > case_timeout:
+                abort_reason = f"timeout at {shots} shots ({wall_elapsed:.1f}s > {case_timeout:.0f}s)"
+                break
 
-                if shots == max_shots:
-                    result_max = result
+            if shots == max_shots:
+                result_max = result
 
         memory_stats = get_memory_stats(device)
     else:
@@ -370,12 +363,6 @@ def run_case(
             except Exception as error:  # pragma: no cover - depends on environment
                 abort_reason = f"aer prepare failed: {str(error).strip()}"
                 prepared_case = None
-
-            if abort_reason is None and prepared_case is not None:
-                try:
-                    _ = aer_adapter.run(prepared_case, 1, warmup=True)
-                except Exception as error:  # pragma: no cover - depends on environment
-                    abort_reason = f"aer warmup failed: {str(error).strip()}"
 
             if abort_reason is None and prepared_case is not None:
                 for shots in SHOT_COUNTS:
@@ -430,11 +417,12 @@ def run_case(
         cpu_util = 0.0
 
     if verbose:
+        _labels = {SHOT_COUNTS[0]: "cold", **{s: "warm" for s in SHOT_COUNTS[1:]}}
         shots_str = "    ".join(
             (
-                f"{s} \u2192 {times[str(s)]:.3f}s (cpu: {cpu_times[str(s)]:.3f}s)"
+                f"{_labels[s]}@{s} \u2192 {times[str(s)]:.3f}s (cpu: {cpu_times[str(s)]:.3f}s)"
                 if str(s) in times else
-                f"{s} \u2192 skipped"
+                f"{_labels[s]}@{s} \u2192 skipped"
             )
             for s in SHOT_COUNTS
         )
@@ -566,9 +554,9 @@ def main() -> None:
         availability = aer_adapter.availability()
         if not availability.available:
             parser.error(f"Aer backend unavailable: {availability.reason}")
-        print(f"Backend: aer | Host device: {device.type} | Git: {git_hash} | Shots: {SHOT_COUNTS}")
+        print(f"Backend: aer | Host device: {device.type} | Git: {git_hash} | Schedule: cold@{SHOT_COUNTS[0]} warm@{SHOT_COUNTS[-1]}")
     else:
-        print(f"Backend: native | Device: {device.type} | Git: {git_hash} | Shots: {SHOT_COUNTS}")
+        print(f"Backend: native | Device: {device.type} | Git: {git_hash} | Schedule: cold@{SHOT_COUNTS[0]} warm@{SHOT_COUNTS[-1]}")
 
     # Sort cases by qubit count ascending so small/fast cases run and save first
     instantiated = [case_fn() for case_fn in cases_to_run]
@@ -643,9 +631,12 @@ def main() -> None:
         print(f"Total time by shot count (static):\n    {_format_totals_line(totals_static)}")
         print(f"Total time by shot count (dynamic):\n    {_format_totals_line(totals_dynamic)}")
 
-        hotspot_shot = str(max(SHOT_COUNTS))
-        _print_hotspot_block(static_rows, label="static", shot_key=hotspot_shot, top_n=5)
-        _print_hotspot_block(dynamic_rows, label="dynamic", shot_key=hotspot_shot, top_n=5)
+        cold_key = str(SHOT_COUNTS[0])
+        warm_key = str(SHOT_COUNTS[-1])
+        _print_hotspot_block(static_rows, label="static cold", shot_key=cold_key, top_n=5)
+        _print_hotspot_block(dynamic_rows, label="dynamic cold", shot_key=cold_key, top_n=5)
+        _print_hotspot_block(static_rows, label="static warm", shot_key=warm_key, top_n=5)
+        _print_hotspot_block(dynamic_rows, label="dynamic warm", shot_key=warm_key, top_n=5)
 
         # Process-level stats
         peak_rss_mb = get_peak_rss_mb()

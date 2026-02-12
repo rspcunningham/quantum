@@ -1,0 +1,180 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 0.016,
+      "10": 0.0438,
+      "100": 0.0734,
+      "1000": 0.073,
+      "10000": 0.079
+    },
+    "static": {
+      "1": 0.0079,
+      "10": 0.0076,
+      "100": 0.0078,
+      "1000": 0.0077,
+      "10000": 0.0089
+    },
+    "dynamic": {
+      "1": 0.0081,
+      "10": 0.0362,
+      "100": 0.0656,
+      "1000": 0.0653,
+      "10000": 0.0701
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "random_universal_rt_8",
+          "time_s": 0.0071,
+          "share_pct": 79.78,
+          "gates": 440,
+          "measurements": 8,
+          "conditional": 0
+        },
+        {
+          "case": "bernstein_vazirani_8",
+          "time_s": 0.0008,
+          "share_pct": 8.99,
+          "gates": 17,
+          "measurements": 7,
+          "conditional": 0
+        },
+        {
+          "case": "ghz_4",
+          "time_s": 0.0005,
+          "share_pct": 5.62,
+          "gates": 4,
+          "measurements": 4,
+          "conditional": 0
+        },
+        {
+          "case": "qpe_4",
+          "time_s": 0.0005,
+          "share_pct": 5.62,
+          "gates": 14,
+          "measurements": 3,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "random_universal_rt_8",
+          "proxy_time_s": 0.007,
+          "case_time_s": 0.0071,
+          "op_count": 440,
+          "case_total_ops": 448
+        },
+        {
+          "op_kind": "gates",
+          "case": "bernstein_vazirani_8",
+          "proxy_time_s": 0.0006,
+          "case_time_s": 0.0008,
+          "op_count": 17,
+          "case_total_ops": 24
+        },
+        {
+          "op_kind": "gates",
+          "case": "qpe_4",
+          "proxy_time_s": 0.0004,
+          "case_time_s": 0.0005,
+          "op_count": 14,
+          "case_total_ops": 17
+        },
+        {
+          "op_kind": "gates",
+          "case": "ghz_4",
+          "proxy_time_s": 0.0003,
+          "case_time_s": 0.0005,
+          "op_count": 4,
+          "case_total_ops": 8
+        },
+        {
+          "op_kind": "measurements",
+          "case": "ghz_4",
+          "proxy_time_s": 0.0003,
+          "case_time_s": 0.0005,
+          "op_count": 4,
+          "case_total_ops": 8
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [
+        {
+          "case": "adaptive_scaled_3q_80r",
+          "time_s": 0.0695,
+          "share_pct": 99.14,
+          "gates": 240,
+          "measurements": 81,
+          "conditional": 80
+        },
+        {
+          "case": "teleportation_chain_3",
+          "time_s": 0.0006,
+          "share_pct": 0.86,
+          "gates": 8,
+          "measurements": 3,
+          "conditional": 2
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "adaptive_scaled_3q_80r",
+          "proxy_time_s": 0.0416,
+          "case_time_s": 0.0695,
+          "op_count": 240,
+          "case_total_ops": 401
+        },
+        {
+          "op_kind": "measurements",
+          "case": "adaptive_scaled_3q_80r",
+          "proxy_time_s": 0.014,
+          "case_time_s": 0.0695,
+          "op_count": 81,
+          "case_total_ops": 401
+        },
+        {
+          "op_kind": "conditional",
+          "case": "adaptive_scaled_3q_80r",
+          "proxy_time_s": 0.0139,
+          "case_time_s": 0.0695,
+          "op_count": 80,
+          "case_total_ops": 401
+        },
+        {
+          "op_kind": "gates",
+          "case": "teleportation_chain_3",
+          "proxy_time_s": 0.0004,
+          "case_time_s": 0.0006,
+          "op_count": 8,
+          "case_total_ops": 13
+        },
+        {
+          "op_kind": "measurements",
+          "case": "teleportation_chain_3",
+          "proxy_time_s": 0.0001,
+          "case_time_s": 0.0006,
+          "op_count": 3,
+          "case_total_ops": 13
+        }
+      ]
+    }
+  },
+  "counts": {
+    "cases_total": 6,
+    "cases_static": 4,
+    "cases_dynamic": 2
+  }
+}

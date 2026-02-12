@@ -1,0 +1,130 @@
+{
+  "shot_counts": [
+    1,
+    10,
+    100,
+    1000,
+    10000
+  ],
+  "totals_s": {
+    "all": {
+      "1": 4.0869,
+      "10": 3.5937,
+      "100": 3.6696,
+      "1000": 3.4955,
+      "10000": 3.4514
+    },
+    "static": {
+      "1": 4.0869,
+      "10": 3.5937,
+      "100": 3.6696,
+      "1000": 3.4955,
+      "10000": 3.4514
+    },
+    "dynamic": {
+      "1": null,
+      "10": null,
+      "100": null,
+      "1000": null,
+      "10000": null
+    }
+  },
+  "hotspot_shot": "10000",
+  "hotspots": {
+    "static": {
+      "cases": [
+        {
+          "case": "qft_roundtrip_rt_20",
+          "time_s": 2.2247,
+          "share_pct": 64.46,
+          "gates": 440,
+          "measurements": 20,
+          "conditional": 0
+        },
+        {
+          "case": "ghz_24",
+          "time_s": 0.4629,
+          "share_pct": 13.41,
+          "gates": 24,
+          "measurements": 24,
+          "conditional": 0
+        },
+        {
+          "case": "bernstein_vazirani_24",
+          "time_s": 0.4173,
+          "share_pct": 12.09,
+          "gates": 54,
+          "measurements": 23,
+          "conditional": 0
+        },
+        {
+          "case": "deutsch_jozsa_22",
+          "time_s": 0.1788,
+          "share_pct": 5.18,
+          "gates": 65,
+          "measurements": 21,
+          "conditional": 0
+        },
+        {
+          "case": "bernstein_vazirani_20",
+          "time_s": 0.0759,
+          "share_pct": 2.2,
+          "gates": 51,
+          "measurements": 19,
+          "conditional": 0
+        }
+      ],
+      "operators_proxy": [
+        {
+          "op_kind": "gates",
+          "case": "qft_roundtrip_rt_20",
+          "proxy_time_s": 2.128,
+          "case_time_s": 2.2247,
+          "op_count": 440,
+          "case_total_ops": 460
+        },
+        {
+          "op_kind": "gates",
+          "case": "bernstein_vazirani_24",
+          "proxy_time_s": 0.2927,
+          "case_time_s": 0.4173,
+          "op_count": 54,
+          "case_total_ops": 77
+        },
+        {
+          "op_kind": "gates",
+          "case": "ghz_24",
+          "proxy_time_s": 0.2314,
+          "case_time_s": 0.4629,
+          "op_count": 24,
+          "case_total_ops": 48
+        },
+        {
+          "op_kind": "measurements",
+          "case": "ghz_24",
+          "proxy_time_s": 0.2314,
+          "case_time_s": 0.4629,
+          "op_count": 24,
+          "case_total_ops": 48
+        },
+        {
+          "op_kind": "gates",
+          "case": "deutsch_jozsa_22",
+          "proxy_time_s": 0.1351,
+          "case_time_s": 0.1788,
+          "op_count": 65,
+          "case_total_ops": 86
+        }
+      ]
+    },
+    "dynamic": {
+      "cases": [],
+      "operators_proxy": []
+    }
+  },
+  "counts": {
+    "cases_total": 7,
+    "cases_static": 7,
+    "cases_dynamic": 0
+  }
+}
