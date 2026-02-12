@@ -891,7 +891,7 @@ class BatchedQuantumSystem:
         return self
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
-        """Apply a dense single-qubit gate via stride-based slicing with CPU scalars."""
+        """Apply a dense single-qubit gate via fused multiply-add with alpha."""
         g = gate.tensor.reshape(2, 2)
         g00, g01, g10, g11 = complex(g[0, 0]), complex(g[0, 1]), complex(g[1, 0]), complex(g[1, 1])
 
@@ -902,14 +902,14 @@ class BatchedQuantumSystem:
         s0 = state[:, :, 0, :]
         s1 = state[:, :, 1, :]
 
-        new_0 = g00 * s0 + g01 * s1
-        new_1 = g10 * s0 + g11 * s1
+        new_0 = (s0 * g00).add_(s1, alpha=g01)
+        new_1 = (s0 * g10).add_(s1, alpha=g11)
 
         self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
         return self
 
     def _apply_dense_two_qubit_gate(self, gate: Gate, targets: tuple[int, int]) -> "BatchedQuantumSystem":
-        """Apply a dense two-qubit gate via stride-based slicing with CPU scalars."""
+        """Apply a dense two-qubit gate via fused multiply-add with alpha."""
         t0, t1 = targets
         g = gate.tensor.reshape(4, 4)
 
@@ -930,10 +930,10 @@ class BatchedQuantumSystem:
         s10 = state[:, :, 1, :, 0, :]
         s11 = state[:, :, 1, :, 1, :]
 
-        out_00 = r[0][0]*s00 + r[0][1]*s01 + r[0][2]*s10 + r[0][3]*s11
-        out_01 = r[1][0]*s00 + r[1][1]*s01 + r[1][2]*s10 + r[1][3]*s11
-        out_10 = r[2][0]*s00 + r[2][1]*s01 + r[2][2]*s10 + r[2][3]*s11
-        out_11 = r[3][0]*s00 + r[3][1]*s01 + r[3][2]*s10 + r[3][3]*s11
+        out_00 = (s00 * r[0][0]).add_(s01, alpha=r[0][1]).add_(s10, alpha=r[0][2]).add_(s11, alpha=r[0][3])
+        out_01 = (s00 * r[1][0]).add_(s01, alpha=r[1][1]).add_(s10, alpha=r[1][2]).add_(s11, alpha=r[1][3])
+        out_10 = (s00 * r[2][0]).add_(s01, alpha=r[2][1]).add_(s10, alpha=r[2][2]).add_(s11, alpha=r[2][3])
+        out_11 = (s00 * r[3][0]).add_(s01, alpha=r[3][1]).add_(s10, alpha=r[3][2]).add_(s11, alpha=r[3][3])
 
         result = torch.stack([
             torch.stack([out_00, out_01], dim=3),
