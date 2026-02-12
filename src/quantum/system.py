@@ -207,6 +207,91 @@ def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gat
     return tuple(result)
 
 
+def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
+    """Fuse consecutive single-qubit gates on the same qubit into one gate.
+
+    Handles dense, diagonal, and permutation 1q gates by converting each to
+    its 2x2 matrix, multiplying at compile time (numpy), and emitting a single
+    fused gate.  Near-identity results are dropped entirely.
+    """
+    n = len(gates)
+    if n < 2:
+        return gates
+
+    # Quick scan: any fusible pair?
+    has_fusion = False
+    for i in range(n - 1):
+        if (
+            len(gates[i].targets) == 1
+            and len(gates[i + 1].targets) == 1
+            and gates[i].targets[0] == gates[i + 1].targets[0]
+        ):
+            has_fusion = True
+            break
+    if not has_fusion:
+        return gates
+
+    def _gate_to_2x2(gate: Gate) -> np.ndarray:
+        if gate.diagonal is not None:
+            d = gate.diagonal.numpy().astype(np.complex64)
+            return np.array([[d[0], 0], [0, d[1]]], dtype=np.complex64)
+        if gate.permutation is not None:
+            perm = gate.permutation.numpy()
+            mat = np.zeros((2, 2), dtype=np.complex64)
+            pf = gate.permutation_factors
+            for idx in range(2):
+                mat[idx, int(perm[idx])] = complex(pf[idx]) if pf is not None else 1.0
+            return mat
+        return gate.tensor.reshape(2, 2).numpy().astype(np.complex64)
+
+    identity_2x2 = np.eye(2, dtype=np.complex64)
+    result: list[Gate] = []
+    i = 0
+    while i < n:
+        gate = gates[i]
+        if len(gate.targets) != 1:
+            result.append(gate)
+            i += 1
+            continue
+
+        target = gate.targets[0]
+        j = i + 1
+        while j < n and len(gates[j].targets) == 1 and gates[j].targets[0] == target:
+            j += 1
+
+        if j - i == 1:
+            result.append(gate)
+            i += 1
+            continue
+
+        # Fuse gates[i:j] into single 2x2
+        mat = _gate_to_2x2(gates[i])
+        for k in range(i + 1, j):
+            mat = _gate_to_2x2(gates[k]) @ mat
+
+        # Near-identity → drop entirely
+        if np.allclose(mat, identity_2x2, atol=1e-6):
+            i = j
+            continue
+
+        # Classify at numpy level (avoids torch overhead in Gate constructor)
+        if abs(mat[0, 1]) < 1e-8 and abs(mat[1, 0]) < 1e-8:
+            result.append(Gate(None, target, diagonal=torch.tensor(
+                [mat[0, 0], mat[1, 1]], dtype=torch.complex64,
+            )))
+        else:
+            g = object.__new__(Gate)
+            g._tensor = torch.tensor(mat, dtype=torch.complex64)
+            g._diagonal = None
+            g._permutation = None
+            g._permutation_factors = None
+            g.targets = [target]
+            result.append(g)
+        i = j
+
+    return tuple(result)
+
+
 def _fuse_segment_permutations(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
     """Replace consecutive permutation gate runs with a single pre-fused permutation.
 
@@ -781,6 +866,8 @@ def _run_compiled_simulation(
         if isinstance(step, _DynamicSegmentStep):
             fused_gates = _fuse_segment_diagonals(step.gates, n_qubits)
             fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
+            if n_qubits >= 17:
+                fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
             if fused_gates is not step.gates:
                 fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
                 any_changed = True
