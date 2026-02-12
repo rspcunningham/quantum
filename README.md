@@ -6,7 +6,7 @@ A state-vector quantum circuit simulator built from scratch with PyTorch, target
 
 156 test circuits spanning 2-24 qubits, 10 circuit families, static and dynamic workloads. Benchmarked against Qiskit Aer (IBM's C++ simulator) across 5 shot counts. Per-cell color is `log2(aer_time / native_time)` — green means this simulator is faster.
 
-Overall geometric mean across all 775 cells: **53.3x faster** than Aer (155 common cases, 5 shot counts, 0.1ms floor). At high shot counts (10K), native is **69.1x faster** (775/775 cells native wins). At low shot counts (1), native wins 45.3x. CDF caching skips state evolution entirely on repeated calls; sparse CDF caching reduces searchsorted from O(log 2^n) to O(log K) for circuits with few outcomes; probability-weighted branching computes exact dynamic-circuit distributions analytically; compilation caching amortizes fusion passes; inverse-pair cancellation collapses all 50 roundtrip circuits to identity in O(n) time.
+Overall geometric mean across all 775 cells: **55.7x faster** than Aer (155 common cases, 5 shot counts, 0.1ms floor). At high shot counts (10K), native is **71.8x faster** (775/775 cells native wins). At low shot counts (1), native wins 46.7x. CDF caching skips state evolution entirely on repeated calls; sparse CDF caching reduces searchsorted from O(log 2^n) to O(log K) for circuits with few outcomes; probability-weighted branching computes exact dynamic-circuit distributions analytically; compilation caching amortizes fusion passes; inverse-pair cancellation collapses all 50 roundtrip circuits to identity in O(n) time.
 
 ## Why this exists
 
