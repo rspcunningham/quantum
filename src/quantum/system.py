@@ -618,7 +618,7 @@ def _advance_branches_with_gate_sequence(
 
         next_state_id = transition_cache.get(state_id)
         if next_state_id is None:
-            gate_system.state_vectors = state_arena[state_id]
+            gate_system.state_vectors = state_arena[state_id].clone()
             if scalar_cache is not None:
                 buf, offsets, alphas = scalar_cache
                 for i, gate in enumerate(gates):
@@ -968,6 +968,14 @@ class BatchedQuantumSystem:
         self.state_vectors = torch.zeros((batch_size, dim), dtype=torch.complex64, device=device)
         self.state_vectors[:, 0] = 1.0
         self.bit_registers = torch.zeros((batch_size, n_bits), dtype=torch.int32, device=device)
+        self._alt_state: torch.Tensor | None = None
+        self._use_double_buffer = device.type != "cpu"
+
+    def _ensure_alt_state(self) -> torch.Tensor:
+        """Return a pre-allocated alternate state buffer for double-buffer swaps."""
+        if self._alt_state is None or self._alt_state.shape != self.state_vectors.shape:
+            self._alt_state = torch.empty_like(self.state_vectors)
+        return self._alt_state
 
     @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
@@ -996,7 +1004,7 @@ class BatchedQuantumSystem:
         return self
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
-        """Apply a dense single-qubit gate via fused multiply-add with alpha."""
+        """Apply a dense single-qubit gate."""
         g = gate.tensor.reshape(2, 2)
         g00, g01, g10, g11 = complex(g[0, 0]), complex(g[0, 1]), complex(g[1, 0]), complex(g[1, 1])
 
@@ -1007,14 +1015,23 @@ class BatchedQuantumSystem:
         s0 = state[:, :, 0, :]
         s1 = state[:, :, 1, :]
 
-        new_0 = (s0 * g00).add_(s1, alpha=g01)
-        new_1 = (s0 * g10).add_(s1, alpha=g11)
-
-        self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
+        if self._use_double_buffer:
+            alt = self._ensure_alt_state().view(self.batch_size, a, 2, b)
+            torch.mul(s0, g00, out=alt[:, :, 0, :])
+            alt[:, :, 0, :].add_(s1, alpha=g01)
+            torch.mul(s0, g10, out=alt[:, :, 1, :])
+            alt[:, :, 1, :].add_(s1, alpha=g11)
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+        else:
+            new_s0 = torch.mul(s0, g00)
+            new_s0.add_(s1, alpha=g01)
+            new_s1 = torch.mul(s0, g10)
+            new_s1.add_(s1, alpha=g11)
+            self.state_vectors = torch.stack([new_s0, new_s1], dim=2).reshape(self.batch_size, -1)
         return self
 
     def _apply_dense_two_qubit_gate(self, gate: Gate, targets: tuple[int, int]) -> "BatchedQuantumSystem":
-        """Apply a dense two-qubit gate via fused multiply-add with alpha."""
+        """Apply a dense two-qubit gate."""
         t0, t1 = targets
         g = gate.tensor.reshape(4, 4)
 
@@ -1035,17 +1052,30 @@ class BatchedQuantumSystem:
         s10 = state[:, :, 1, :, 0, :]
         s11 = state[:, :, 1, :, 1, :]
 
-        out_00 = (s00 * r[0][0]).add_(s01, alpha=r[0][1]).add_(s10, alpha=r[0][2]).add_(s11, alpha=r[0][3])
-        out_01 = (s00 * r[1][0]).add_(s01, alpha=r[1][1]).add_(s10, alpha=r[1][2]).add_(s11, alpha=r[1][3])
-        out_10 = (s00 * r[2][0]).add_(s01, alpha=r[2][1]).add_(s10, alpha=r[2][2]).add_(s11, alpha=r[2][3])
-        out_11 = (s00 * r[3][0]).add_(s01, alpha=r[3][1]).add_(s10, alpha=r[3][2]).add_(s11, alpha=r[3][3])
-
-        result = torch.stack([
-            torch.stack([out_00, out_01], dim=3),
-            torch.stack([out_10, out_11], dim=3),
-        ], dim=2)
-
-        self.state_vectors = result.reshape(self.batch_size, -1)
+        if self._use_double_buffer:
+            alt = self._ensure_alt_state().view(self.batch_size, a, 2, b, 2, c)
+            torch.mul(s00, r[0][0], out=alt[:, :, 0, :, 0, :])
+            alt[:, :, 0, :, 0, :].add_(s01, alpha=r[0][1]).add_(s10, alpha=r[0][2]).add_(s11, alpha=r[0][3])
+            torch.mul(s00, r[1][0], out=alt[:, :, 0, :, 1, :])
+            alt[:, :, 0, :, 1, :].add_(s01, alpha=r[1][1]).add_(s10, alpha=r[1][2]).add_(s11, alpha=r[1][3])
+            torch.mul(s00, r[2][0], out=alt[:, :, 1, :, 0, :])
+            alt[:, :, 1, :, 0, :].add_(s01, alpha=r[2][1]).add_(s10, alpha=r[2][2]).add_(s11, alpha=r[2][3])
+            torch.mul(s00, r[3][0], out=alt[:, :, 1, :, 1, :])
+            alt[:, :, 1, :, 1, :].add_(s01, alpha=r[3][1]).add_(s10, alpha=r[3][2]).add_(s11, alpha=r[3][3])
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+        else:
+            new_s00 = torch.mul(s00, r[0][0])
+            new_s00.add_(s01, alpha=r[0][1]).add_(s10, alpha=r[0][2]).add_(s11, alpha=r[0][3])
+            new_s01 = torch.mul(s00, r[1][0])
+            new_s01.add_(s01, alpha=r[1][1]).add_(s10, alpha=r[1][2]).add_(s11, alpha=r[1][3])
+            new_s10 = torch.mul(s00, r[2][0])
+            new_s10.add_(s01, alpha=r[2][1]).add_(s10, alpha=r[2][2]).add_(s11, alpha=r[2][3])
+            new_s11 = torch.mul(s00, r[3][0])
+            new_s11.add_(s01, alpha=r[3][1]).add_(s10, alpha=r[3][2]).add_(s11, alpha=r[3][3])
+            self.state_vectors = torch.stack([
+                torch.stack([new_s00, new_s01], dim=3),
+                torch.stack([new_s10, new_s11], dim=3),
+            ], dim=2).reshape(self.batch_size, -1)
         return self
 
     def _apply_diagonal_gate(self, gate: Gate) -> "BatchedQuantumSystem":
@@ -1173,9 +1203,19 @@ class BatchedQuantumSystem:
             state = self.state_vectors.view(self.batch_size, a, 2, b)
             s0 = state[:, :, 0, :]
             s1 = state[:, :, 1, :]
-            new_0 = (s0 * buf[offset]).add_(s1, alpha=alphas[0])
-            new_1 = (s0 * buf[offset + 1]).add_(s1, alpha=alphas[1])
-            self.state_vectors = torch.stack([new_0, new_1], dim=2).reshape(self.batch_size, -1)
+            if self._use_double_buffer:
+                alt = self._ensure_alt_state().view(self.batch_size, a, 2, b)
+                torch.mul(s0, buf[offset], out=alt[:, :, 0, :])
+                alt[:, :, 0, :].add_(s1, alpha=alphas[0])
+                torch.mul(s0, buf[offset + 1], out=alt[:, :, 1, :])
+                alt[:, :, 1, :].add_(s1, alpha=alphas[1])
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+            else:
+                new_s0 = torch.mul(s0, buf[offset])
+                new_s0.add_(s1, alpha=alphas[0])
+                new_s1 = torch.mul(s0, buf[offset + 1])
+                new_s1.add_(s1, alpha=alphas[1])
+                self.state_vectors = torch.stack([new_s0, new_s1], dim=2).reshape(self.batch_size, -1)
             return
         if k == 2:
             t0, t1 = targets
@@ -1189,15 +1229,30 @@ class BatchedQuantumSystem:
             s01 = state[:, :, 0, :, 1, :]
             s10 = state[:, :, 1, :, 0, :]
             s11 = state[:, :, 1, :, 1, :]
-            out_00 = (s00 * buf[offset]).add_(s01, alpha=alphas[0]).add_(s10, alpha=alphas[1]).add_(s11, alpha=alphas[2])
-            out_01 = (s00 * buf[offset + 1]).add_(s01, alpha=alphas[3]).add_(s10, alpha=alphas[4]).add_(s11, alpha=alphas[5])
-            out_10 = (s00 * buf[offset + 2]).add_(s01, alpha=alphas[6]).add_(s10, alpha=alphas[7]).add_(s11, alpha=alphas[8])
-            out_11 = (s00 * buf[offset + 3]).add_(s01, alpha=alphas[9]).add_(s10, alpha=alphas[10]).add_(s11, alpha=alphas[11])
-            result = torch.stack([
-                torch.stack([out_00, out_01], dim=3),
-                torch.stack([out_10, out_11], dim=3),
-            ], dim=2)
-            self.state_vectors = result.reshape(self.batch_size, -1)
+            if self._use_double_buffer:
+                alt = self._ensure_alt_state().view(self.batch_size, a, 2, b, 2, c)
+                torch.mul(s00, buf[offset], out=alt[:, :, 0, :, 0, :])
+                alt[:, :, 0, :, 0, :].add_(s01, alpha=alphas[0]).add_(s10, alpha=alphas[1]).add_(s11, alpha=alphas[2])
+                torch.mul(s00, buf[offset + 1], out=alt[:, :, 0, :, 1, :])
+                alt[:, :, 0, :, 1, :].add_(s01, alpha=alphas[3]).add_(s10, alpha=alphas[4]).add_(s11, alpha=alphas[5])
+                torch.mul(s00, buf[offset + 2], out=alt[:, :, 1, :, 0, :])
+                alt[:, :, 1, :, 0, :].add_(s01, alpha=alphas[6]).add_(s10, alpha=alphas[7]).add_(s11, alpha=alphas[8])
+                torch.mul(s00, buf[offset + 3], out=alt[:, :, 1, :, 1, :])
+                alt[:, :, 1, :, 1, :].add_(s01, alpha=alphas[9]).add_(s10, alpha=alphas[10]).add_(s11, alpha=alphas[11])
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+            else:
+                new_s00 = torch.mul(s00, buf[offset])
+                new_s00.add_(s01, alpha=alphas[0]).add_(s10, alpha=alphas[1]).add_(s11, alpha=alphas[2])
+                new_s01 = torch.mul(s00, buf[offset + 1])
+                new_s01.add_(s01, alpha=alphas[3]).add_(s10, alpha=alphas[4]).add_(s11, alpha=alphas[5])
+                new_s10 = torch.mul(s00, buf[offset + 2])
+                new_s10.add_(s01, alpha=alphas[6]).add_(s10, alpha=alphas[7]).add_(s11, alpha=alphas[8])
+                new_s11 = torch.mul(s00, buf[offset + 3])
+                new_s11.add_(s01, alpha=alphas[9]).add_(s10, alpha=alphas[10]).add_(s11, alpha=alphas[11])
+                self.state_vectors = torch.stack([
+                    torch.stack([new_s00, new_s01], dim=3),
+                    torch.stack([new_s10, new_s11], dim=3),
+                ], dim=2).reshape(self.batch_size, -1)
             return
         self.apply_gate(gate)
 
