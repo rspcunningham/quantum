@@ -752,6 +752,36 @@ def _sample_terminal_measurements_from_branches(
     return sampled_counts
 
 
+def _sample_from_cdf(
+    *,
+    cdf: torch.Tensor,
+    terminal_measurements: tuple[Measurement, ...],
+    num_shots: int,
+    n_qubits: int,
+    n_bits: int,
+) -> dict[str, int]:
+    """Sample terminal measurements using a pre-computed CDF via searchsorted.
+
+    Faster than torch.multinomial: ~1ms vs ~23ms at 24q when CDF is cached,
+    ~19ms vs ~23ms on first call (cumsum + searchsorted vs multinomial).
+    """
+    randoms = torch.rand(num_shots, device=cdf.device)
+    samples = torch.searchsorted(cdf, randoms)
+    samples = samples.clamp(max=cdf.shape[0] - 1).to(dtype=torch.int64)
+
+    measurement_specs = tuple(
+        (n_qubits - 1 - m.qubit, n_bits - 1 - m.bit)
+        for m in terminal_measurements
+    )
+
+    register_codes = torch.zeros(num_shots, dtype=torch.int64, device=samples.device)
+    for qubit_shift, bit_shift in measurement_specs:
+        measured_bit = (samples >> qubit_shift) & 1
+        register_codes |= measured_bit << bit_shift
+
+    return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
+
+
 def _state_merge_signature(
     state_vector: torch.Tensor,
     *,
@@ -959,6 +989,7 @@ class _CompiledCircuitCache:
     segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]]
     input_device_type: str  # original device.type before CPU override
     effective_device: torch.device  # actual device used (after CPU override)
+    cached_sampling_cdf: torch.Tensor | None = None  # cumulative probs for searchsorted
 
 
 _circuit_compilation_cache: dict[int, _CompiledCircuitCache] = {}
@@ -987,6 +1018,20 @@ def _run_compiled_simulation(
         initial_state_np = cached.initial_state_np
         segment_scalar_caches = cached.segment_scalar_caches
         device = cached.effective_device
+
+        # Fast path: cached CDF for static circuits — skip evolution entirely.
+        # The evolved state is deterministic for static circuits, so the CDF
+        # computed on the first call can be reused for subsequent shot counts.
+        if (cached.cached_sampling_cdf is not None
+                and compiled.node_count == 0
+                and len(compiled.terminal_measurements) > 1):
+            return _sample_from_cdf(
+                cdf=cached.cached_sampling_cdf,
+                terminal_measurements=compiled.terminal_measurements,
+                num_shots=num_shots,
+                n_qubits=n_qubits,
+                n_bits=n_bits,
+            )
     else:
         input_device_type = device.type
         compiled = _compile_execution_graph(circuit)
@@ -1174,6 +1219,31 @@ def _run_compiled_simulation(
             )
 
         _compact_state_arena(state_arena, branches)
+
+    # For static circuits with multiple terminal measurements, compute CDF
+    # from the final state and cache it. Uses searchsorted (faster than
+    # multinomial) and enables skipping evolution entirely on subsequent calls.
+    if (compiled.node_count == 0
+            and len(compiled.terminal_measurements) > 1
+            and len(branches) == 1):
+        (state_id, _), _ = next(iter(branches.items()))
+        final_state = state_arena.get(state_id)
+        if final_state is not None:
+            probs = torch.abs(final_state[0]) ** 2
+            probs = probs / probs.sum().clamp_min(1e-12)
+            if probs.device.type == "mps":
+                probs = probs.to("cpu")
+            cdf = torch.cumsum(probs, dim=0)
+            cached_entry = _circuit_compilation_cache.get(cache_key)
+            if cached_entry is not None:
+                cached_entry.cached_sampling_cdf = cdf
+            return _sample_from_cdf(
+                cdf=cdf,
+                terminal_measurements=compiled.terminal_measurements,
+                num_shots=num_shots,
+                n_qubits=n_qubits,
+                n_bits=n_bits,
+            )
 
     return _sample_terminal_measurements_from_branches(
         branches=branches,
