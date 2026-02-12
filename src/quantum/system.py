@@ -1040,7 +1040,7 @@ def _single_qubit_gate_runtime_cost(gate: Gate) -> float:
 def _fuse_gates_into_blocks(
     gates: tuple[Gate, ...],
     n_qubits: int,
-    max_block_qubits: int = 5,
+    max_block_qubits: int = 6,
 ) -> tuple[Gate, ...]:
     """Fuse consecutive gates into multi-qubit unitary blocks.
 
@@ -1160,7 +1160,6 @@ def _fuse_gates_into_blocks(
 
     _close_block()
     return tuple(result)
-
 
 def _two_qubit_gate_runtime_cost(gate: Gate) -> float:
     """Relative runtime cost model for 2q gate application."""
