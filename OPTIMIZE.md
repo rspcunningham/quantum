@@ -150,9 +150,11 @@ After each optimization iteration, update the artifacts that drive decisions:
 1. Run full suite for native only (`uv run bench -v`) and use the latest native JSONL.
 2. Use the pinned Aer reference JSONL: `benchmarks/results/2026-02-11T211659.jsonl`.
 3. Read both JSONL files directly.
-4. Generate `docs/native-vs-aer.png` with one-off, ephemeral analysis code. This is a single figure with two subplots side by side:
-   - **Left subplot**: shot-level geometric-mean ratio bar chart (`aer/native`) plus overall headline ratio.
-   - **Right subplot**: per-case, per-shot heatmap of `aer/native` on a `log2` color scale (green = native faster, red = Aer faster).
+4. Generate `docs/native-vs-aer.png` with one-off, ephemeral analysis code. This is a single heatmap figure (landscape, ~16:9):
+   - **X-axis**: test circuits (sorted by qubit count, no tick labels, labeled "test circuit").
+   - **Y-axis**: shot counts (@1, @10, @100, @1K, @10K).
+   - **Color**: `log2(aer_time / native_time)` with a diverging scale (green = faster than SOTA, red = Aer faster).
+   - **Title**: overall geometric mean ratio.
 5. Read the image after generation and verify it renders correctly.
 6. Update the README section that explains the graph with concrete numbers from the latest pair of JSONLs.
 7. Only refresh the pinned Aer JSONL in a separate maintenance pass (e.g., benchmark suite/harness/environment change), not in normal optimization iterations.
@@ -190,7 +192,7 @@ Do not commit helper scripts for this. Keep the analysis ephemeral and data-driv
 | `benchmarks/generate_circuits.py` | QASM circuit generator |
 | `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log (what was tried, what worked, what didn't) |
-| `docs/native-vs-aer.png` | Combined native-vs-aer comparison (hero + heatmap) |
+| `docs/native-vs-aer.png` | Native-vs-Aer heatmap comparison |
 | `docs/progress-data.md` | Full-suite progress chart data |
 | `docs/progress-data-core.md` | Core-6 progress chart data (legacy, saturated) |
 

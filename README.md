@@ -113,6 +113,6 @@ See `examples/` for standalone scripts: a Bell state, a simple Grover's search, 
 | `benchmarks/generate_circuits.py` | QASM circuit generator |
 | `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log |
-| `docs/native-vs-aer.png` | Combined native-vs-aer comparison (hero + heatmap) |
+| `docs/native-vs-aer.png` | Native-vs-Aer heatmap comparison |
 | `docs/progress-data.md` | Full-suite progress chart data |
 | `docs/progress-data-core.md` | Core-6 progress chart data |
