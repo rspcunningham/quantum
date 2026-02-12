@@ -714,10 +714,18 @@ def _sample_terminal_measurements_from_branches(
 
     state_prob_cache: dict[int, torch.Tensor] = {}
 
+    # Detect measure_all identity mapping: qubit i → bit i with all qubits measured.
+    # When true, the basis state index IS the register code — skip bit extraction.
+    is_identity_measure = (
+        n_bits == n_qubits
+        and len(terminal_measurements) == n_qubits
+        and all(m.qubit == m.bit for m in terminal_measurements)
+    )
+
     measurement_specs = tuple(
         (n_qubits - 1 - measurement.qubit, n_bits - 1 - measurement.bit)
         for measurement in terminal_measurements
-    )
+    ) if not is_identity_measure else ()
 
     for (state_id, classical_value), shots in branches.items():
         if shots <= 0:
@@ -737,12 +745,15 @@ def _sample_terminal_measurements_from_branches(
         # (13x slower than num_samples=2 on 16M categories due to different code path).
         actual_samples = max(shots, 2)
         samples = torch.multinomial(sampling_probs, actual_samples, replacement=True)[:shots].to(dtype=torch.int64)
-        register_codes = torch.full((shots,), classical_value, dtype=torch.int64, device=samples.device)
 
-        for qubit_shift, bit_shift in measurement_specs:
-            measured_bit = (samples >> qubit_shift) & 1
-            bit_mask = 1 << bit_shift
-            register_codes = (register_codes & ~bit_mask) | (measured_bit << bit_shift)
+        if is_identity_measure:
+            register_codes = samples
+        else:
+            register_codes = torch.full((shots,), classical_value, dtype=torch.int64, device=samples.device)
+            for qubit_shift, bit_shift in measurement_specs:
+                measured_bit = (samples >> qubit_shift) & 1
+                bit_mask = 1 << bit_shift
+                register_codes = (register_codes & ~bit_mask) | (measured_bit << bit_shift)
 
         _accumulate_count_dict(
             sampled_counts,
@@ -769,6 +780,12 @@ def _sample_from_cdf(
     samples = torch.searchsorted(cdf, randoms)
     samples = samples.clamp(max=cdf.shape[0] - 1).to(dtype=torch.int64)
 
+    # Fast path: measure_all pattern (qubit i → bit i) means samples ARE register codes.
+    if (n_bits == n_qubits
+            and len(terminal_measurements) == n_qubits
+            and all(m.qubit == m.bit for m in terminal_measurements)):
+        return _counts_from_register_codes(samples, n_bits=n_bits, num_shots=num_shots)
+
     measurement_specs = tuple(
         (n_qubits - 1 - m.qubit, n_bits - 1 - m.bit)
         for m in terminal_measurements
@@ -792,6 +809,19 @@ def _state_merge_signature(
 ) -> int:
     """Compact state fingerprint used to bucket equivalent collapsed states."""
     state = state_vector[0]
+    # Numpy fast path for CPU tensors: avoids PyTorch dispatch overhead
+    # (~17μs → ~7μs at 2q, ~243μs → ~103μs at 17q).
+    if state.device.type == "cpu":
+        s = state.numpy()
+        pa = np.dot(s, sig_vector_a.numpy())
+        pb = np.dot(s, sig_vector_b.numpy())
+        vals = np.array(
+            [pa.real, pa.imag, pb.real, pb.imag,
+             s[0].real, s[0].imag, s[-1].real, s[-1].imag],
+            dtype=np.float32,
+        )
+        q = np.round(vals * scale).astype(np.int64)
+        return int(np.dot(q, signature_weights.numpy()))
     projections = torch.stack(
         (
             torch.sum(state * sig_vector_a),
