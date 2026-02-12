@@ -36,6 +36,7 @@ Benchmark schedule: cold @1K (cache cleared) + warm @10K per circuit. Two calls 
 | idx | checkpoint_jsonl | git_hash | label_x | cold_1000_s | warm_10000_s | cases_complete |
 |---:|---|---|---|---:|---:|---:|
 | 12 | `2026-02-12T154156.jsonl` | `4ed771f` | `4ed771f\n02-12T1541` | 68.7304 | 0.1753 | 216 |
+| 13 | `2026-02-12T185245.jsonl` | `5f6ec69` | `5f6ec69\n02-12T1852` | 86.1442 | 0.1929 | 229 |
 
 ## SOTA Reference — Qiskit Aer (Full Suite)
 
