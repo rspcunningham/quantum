@@ -3,6 +3,7 @@
 import argparse
 import gc
 import json
+import os
 import resource
 import subprocess
 import sys
@@ -13,7 +14,9 @@ from pathlib import Path
 
 import torch
 
+from benchmarks.backends.aer_adapter import AerAdapter
 from benchmarks.cases import BenchmarkCase, ALL_CASES, CORE_CASES
+from benchmarks.ir import build_circuit_ir
 from quantum import run_simulation, infer_resources
 from quantum.gates import Gate, Measurement, ConditionalGate, Circuit
 
@@ -126,6 +129,37 @@ def get_memory_stats(device: torch.device) -> dict[str, float]:
         stats["allocated_mb"] = torch.mps.current_allocated_memory() / 1024 / 1024
         stats["driver_mb"] = torch.mps.driver_allocated_memory() / 1024 / 1024
     return stats
+
+
+def get_peak_rss_mb() -> float:
+    """Process peak RSS in MB (macOS reports bytes, Linux reports KB)."""
+    rusage = resource.getrusage(resource.RUSAGE_SELF)
+    return rusage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else rusage.ru_maxrss / 1024
+
+
+def get_process_rss_mb() -> float | None:
+    """Current process RSS in MB via `ps`; returns None when unavailable."""
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rss_kb = float(result.stdout.strip())
+        return rss_kb / 1024.0
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+        return None
+
+
+def add_process_memory_stats(memory_stats: dict[str, float], *, rss_before: float | None, rss_after: float | None) -> None:
+    if rss_before is not None:
+        memory_stats["process_rss_before_mb"] = rss_before
+    if rss_after is not None:
+        memory_stats["process_rss_after_mb"] = rss_after
+    if rss_before is not None and rss_after is not None:
+        memory_stats["process_rss_delta_mb"] = rss_after - rss_before
+    memory_stats["process_peak_rss_mb"] = get_peak_rss_mb()
 
 
 def check_correctness(
@@ -257,7 +291,9 @@ def run_case(
     verbose: bool,
     git_hash: str,
     *,
+    backend: str = "native",
     case_timeout: float | None = None,
+    aer_adapter: AerAdapter | None = None,
 ) -> dict:
     n_qubits = case.n_qubits
     display_qubits = n_qubits if n_qubits is not None else infer_resources(case.circuit)[0]
@@ -266,66 +302,132 @@ def run_case(
     workload = analyze_workload(case.circuit)
     total_ops = ops["gates"] + ops["measurements"] + ops["conditional"]
 
-    # Warmup
-    run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
-    sync_device(device)
-
     times: dict[str, float] = {}
     cpu_times: dict[str, float] = {}
     result_max: dict[str, int] | None = None
     memory_stats: dict[str, float] = {}
     max_shots = max(SHOT_COUNTS)
     abort_reason: str | None = None
+    rss_before = get_process_rss_mb()
 
-    for shots in SHOT_COUNTS:
+    if backend == "native":
+        # Warmup
         try:
+            run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
             sync_device(device)
-            wall_start = time.perf_counter()
-            cpu_start = time.process_time()
-            result = run_simulation(case.circuit, shots, n_qubits=n_qubits, device=device)
-            sync_device(device)
-            wall_elapsed = time.perf_counter() - wall_start
-            cpu_elapsed = time.process_time() - cpu_start
         except RuntimeError as error:
             if is_oom_error(error):
-                abort_reason = f"OOM at {shots} shots: {str(error).strip()}"
+                abort_reason = f"OOM during warmup: {str(error).strip()}"
                 clear_device_cache(device)
-                break
-            raise
+            else:
+                abort_reason = f"runtime error during warmup: {str(error).strip()}"
+        except Exception as error:
+            abort_reason = f"error during warmup: {str(error).strip()}"
 
-        times[str(shots)] = round(wall_elapsed, 4)
-        cpu_times[str(shots)] = round(cpu_elapsed, 4)
+        if abort_reason is None:
+            for shots in SHOT_COUNTS:
+                try:
+                    sync_device(device)
+                    wall_start = time.perf_counter()
+                    cpu_start = time.process_time()
+                    result = run_simulation(case.circuit, shots, n_qubits=n_qubits, device=device)
+                    sync_device(device)
+                    wall_elapsed = time.perf_counter() - wall_start
+                    cpu_elapsed = time.process_time() - cpu_start
+                except RuntimeError as error:
+                    if is_oom_error(error):
+                        abort_reason = f"OOM at {shots} shots: {str(error).strip()}"
+                        clear_device_cache(device)
+                    else:
+                        abort_reason = f"runtime error at {shots} shots: {str(error).strip()}"
+                    break
+                except Exception as error:
+                    abort_reason = f"error at {shots} shots: {str(error).strip()}"
+                    break
 
-        if case_timeout is not None and wall_elapsed > case_timeout:
-            abort_reason = f"timeout at {shots} shots ({wall_elapsed:.1f}s > {case_timeout:.0f}s)"
-            break
+                times[str(shots)] = round(wall_elapsed, 4)
+                cpu_times[str(shots)] = round(cpu_elapsed, 4)
 
-        if shots == max_shots:
-            result_max = result
-            memory_stats = get_memory_stats(device)
+                if case_timeout is not None and wall_elapsed > case_timeout:
+                    abort_reason = f"timeout at {shots} shots ({wall_elapsed:.1f}s > {case_timeout:.0f}s)"
+                    break
+
+                if shots == max_shots:
+                    result_max = result
+
+        memory_stats = get_memory_stats(device)
+    else:
+        if aer_adapter is None:
+            raise RuntimeError("Aer adapter is required when backend='aer'.")
+
+        case_ir = build_circuit_ir(case.circuit, n_qubits=n_qubits)
+        supported, support_reason = aer_adapter.supports(case_ir)
+        if not supported:
+            abort_reason = f"aer unsupported: {support_reason or 'unknown reason'}"
+        else:
+            try:
+                prepared_case = aer_adapter.prepare(case_ir)
+            except Exception as error:  # pragma: no cover - depends on environment
+                abort_reason = f"aer prepare failed: {str(error).strip()}"
+                prepared_case = None
+
+            if abort_reason is None and prepared_case is not None:
+                try:
+                    _ = aer_adapter.run(prepared_case, 1, warmup=True)
+                except Exception as error:  # pragma: no cover - depends on environment
+                    abort_reason = f"aer warmup failed: {str(error).strip()}"
+
+            if abort_reason is None and prepared_case is not None:
+                for shots in SHOT_COUNTS:
+                    try:
+                        wall_start = time.perf_counter()
+                        cpu_start = time.process_time()
+                        result = aer_adapter.run(prepared_case, shots)
+                        wall_elapsed = time.perf_counter() - wall_start
+                        cpu_elapsed = time.process_time() - cpu_start
+                    except Exception as error:  # pragma: no cover - depends on environment
+                        abort_reason = f"aer runtime abort at {shots} shots: {str(error).strip()}"
+                        break
+
+                    times[str(shots)] = round(wall_elapsed, 4)
+                    cpu_times[str(shots)] = round(cpu_elapsed, 4)
+
+                    if case_timeout is not None and wall_elapsed > case_timeout:
+                        abort_reason = f"timeout at {shots} shots ({wall_elapsed:.1f}s > {case_timeout:.0f}s)"
+                        break
+
+                    if shots == max_shots:
+                        result_max = result
+
+    rss_after = get_process_rss_mb()
+    add_process_memory_stats(memory_stats, rss_before=rss_before, rss_after=rss_after)
 
     completed_shots = [s for s in SHOT_COUNTS if str(s) in times]
-    if not completed_shots:
-        raise RuntimeError(f"{case.name}: no shot count completed successfully.")
-    metric_shots = max(completed_shots)
+    metric_shots = max(completed_shots) if completed_shots else None
 
     if abort_reason is not None:
-        if not memory_stats:
-            memory_stats = get_memory_stats(device)
         correct = False
         errors = [abort_reason]
-    elif result_max is not None:
+    elif result_max is not None and metric_shots == max_shots:
         correct, errors = check_correctness(result_max, case.expected, case.tolerance)
+    elif metric_shots is not None:
+        correct = False
+        errors = [f"incomplete shot ladder, highest completed={metric_shots}"]
     else:
         correct = False
-        errors = ["incomplete shot ladder"]
+        errors = ["no shot count completed"]
 
-    # Derived metrics at highest configured shot count
-    wall_max = times[str(metric_shots)]
-    cpu_max = cpu_times[str(metric_shots)]
-    ops_per_sec = round(total_ops / wall_max, 1) if wall_max > 0 else 0
-    shots_per_sec = round(metric_shots / wall_max, 1) if wall_max > 0 else 0
-    cpu_util = round(cpu_max / wall_max, 3) if wall_max > 0 else 0
+    # Derived metrics at highest completed shot count
+    if metric_shots is not None:
+        wall_max = times[str(metric_shots)]
+        cpu_max = cpu_times[str(metric_shots)]
+        ops_per_sec = round(total_ops / wall_max, 1) if wall_max > 0 else 0
+        shots_per_sec = round(metric_shots / wall_max, 1) if wall_max > 0 else 0
+        cpu_util = round(cpu_max / wall_max, 3) if wall_max > 0 else 0
+    else:
+        ops_per_sec = 0.0
+        shots_per_sec = 0.0
+        cpu_util = 0.0
 
     if verbose:
         shots_str = "    ".join(
@@ -338,9 +440,10 @@ def run_case(
         )
         mem_parts = [f"{k}: {v:.1f}" for k, v in memory_stats.items()]
         mem_str = ", ".join(mem_parts) if mem_parts else "n/a"
-        print(f"\n{case.name} ({display_qubits} qubits, {total_ops} ops, {workload['workload_class']})")
+        metric_label = f"at {metric_shots} shots" if metric_shots is not None else "n/a"
+        print(f"\n{case.name} [{backend}] ({display_qubits} qubits, {total_ops} ops, {workload['workload_class']})")
         print(f"  shots:    {shots_str}")
-        print(f"  ops/s:    {ops_per_sec}  |  shots/s: {shots_per_sec}  |  cpu util: {cpu_util} (at {metric_shots} shots)")
+        print(f"  ops/s:    {ops_per_sec}  |  shots/s: {shots_per_sec}  |  cpu util: {cpu_util} ({metric_label})")
         print(f"  memory:   {mem_str}")
         if abort_reason is not None:
             status = f"ABORT \u2014 {abort_reason}"
@@ -349,9 +452,10 @@ def run_case(
         print(f"  correct:  {status}")
 
     return {
+        "backend": backend,
         "case": case.name,
         "git_hash": git_hash,
-        "device": device.type,
+        "device": device.type if backend == "native" else "cpu",
         "n_qubits": display_qubits,
         "workload_class": workload["workload_class"],
         "has_conditional": workload["has_conditional"],
@@ -369,6 +473,44 @@ def run_case(
         "aborted": abort_reason is not None,
         "abort_reason": abort_reason,
         "errors": errors,
+    }
+
+
+def build_aborted_row(
+    case: BenchmarkCase,
+    *,
+    backend: str,
+    device: torch.device,
+    git_hash: str,
+    abort_reason: str,
+    memory_stats: dict[str, float] | None = None,
+) -> dict:
+    display_qubits = case.n_qubits if case.n_qubits is not None else infer_resources(case.circuit)[0]
+    workload = analyze_workload(case.circuit)
+    ops = count_ops(case.circuit)
+    memory_payload = {k: round(v, 2) for k, v in (memory_stats or {}).items()}
+    return {
+        "backend": backend,
+        "case": case.name,
+        "git_hash": git_hash,
+        "device": device.type if backend == "native" else "cpu",
+        "n_qubits": display_qubits,
+        "workload_class": workload["workload_class"],
+        "has_conditional": workload["has_conditional"],
+        "has_non_terminal_measurement": workload["has_non_terminal_measurement"],
+        "ops": ops,
+        "times_s": {},
+        "cpu_times_s": {},
+        "shot_counts": SHOT_COUNTS,
+        "metric_shots": None,
+        "ops_per_sec": 0.0,
+        "shots_per_sec": 0.0,
+        "cpu_util": 0.0,
+        "memory": memory_payload,
+        "correct": False,
+        "aborted": True,
+        "abort_reason": abort_reason,
+        "errors": [abort_reason],
     }
 
 
@@ -392,6 +534,12 @@ def main() -> None:
         default=30.0,
         help="Max wall-clock seconds per case per shot count. Cases exceeding this are aborted (default: 30).",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["native", "aer"],
+        default="native",
+        help="Execution backend (default: native).",
+    )
     args = parser.parse_args()
 
     if args.core and args.cases:
@@ -412,7 +560,15 @@ def main() -> None:
 
     device = get_device()
     git_hash = get_git_hash()
-    print(f"Device: {device.type} | Git: {git_hash} | Shots: {SHOT_COUNTS}")
+    aer_adapter: AerAdapter | None = None
+    if args.backend == "aer":
+        aer_adapter = AerAdapter()
+        availability = aer_adapter.availability()
+        if not availability.available:
+            parser.error(f"Aer backend unavailable: {availability.reason}")
+        print(f"Backend: aer | Host device: {device.type} | Git: {git_hash} | Shots: {SHOT_COUNTS}")
+    else:
+        print(f"Backend: native | Device: {device.type} | Git: {git_hash} | Shots: {SHOT_COUNTS}")
 
     # Sort cases by qubit count ascending so small/fast cases run and save first
     instantiated = [case_fn() for case_fn in cases_to_run]
@@ -429,22 +585,45 @@ def main() -> None:
 
     with open(output_path, "w") as jsonl_f:
         for case in instantiated:
+            outer_non_oom_error = False
             try:
-                result = run_case(case, device, args.verbose, git_hash, case_timeout=args.timeout)
+                result = run_case(
+                    case,
+                    device,
+                    args.verbose,
+                    git_hash,
+                    backend=args.backend,
+                    case_timeout=args.timeout,
+                    aer_adapter=aer_adapter,
+                )
             except Exception as e:
                 print(f"\nERROR in {case.name}: {e}")
-                failures.append(case.name)
-                continue
+                error_text = str(e).strip()
+                is_oom = is_oom_error(e)
+                abort_reason = f"outer {'OOM' if is_oom else 'error'}: {error_text}"
+                outer_non_oom_error = not is_oom
+                rss_now = get_process_rss_mb()
+                fallback_memory: dict[str, float] = get_memory_stats(device) if args.backend == "native" else {}
+                add_process_memory_stats(fallback_memory, rss_before=rss_now, rss_after=rss_now)
+                result = build_aborted_row(
+                    case,
+                    backend=args.backend,
+                    device=device,
+                    git_hash=git_hash,
+                    abort_reason=abort_reason,
+                    memory_stats=fallback_memory,
+                )
             results.append(result)
             jsonl_f.write(json.dumps(result) + "\n")
             jsonl_f.flush()
-            if not result["correct"] and not result.get("aborted"):
+            if outer_non_oom_error:
+                failures.append(result["case"])
+            elif not result["correct"] and not result.get("aborted"):
                 failures.append(result["case"])
 
     print(f"Wrote {output_path}")
 
     # Summary — only include cases that completed all shot counts
-    summary_payload: dict[str, object] = {}
     if results:
         complete_results = [r for r in results if not r.get("aborted") and all(str(s) in r["times_s"] for s in SHOT_COUNTS)]
         aborted_count = sum(1 for r in results if r.get("aborted"))
@@ -468,42 +647,12 @@ def main() -> None:
         _print_hotspot_block(static_rows, label="static", shot_key=hotspot_shot, top_n=5)
         _print_hotspot_block(dynamic_rows, label="dynamic", shot_key=hotspot_shot, top_n=5)
 
-        summary_payload = {
-            "shot_counts": SHOT_COUNTS,
-            "totals_s": {
-                "all": totals_all,
-                "static": totals_static,
-                "dynamic": totals_dynamic,
-            },
-            "hotspot_shot": hotspot_shot,
-            "hotspots": {
-                "static": _category_hotspot_summary(static_rows, shot_key=hotspot_shot, top_n=5),
-                "dynamic": _category_hotspot_summary(dynamic_rows, shot_key=hotspot_shot, top_n=5),
-            },
-            "counts": {
-                "cases_total": len(results),
-                "cases_complete": len(complete_results),
-                "cases_aborted": aborted_count,
-                "cases_static": len(static_rows),
-                "cases_dynamic": len(dynamic_rows),
-            },
-        }
-
         # Process-level stats
-        rusage = resource.getrusage(resource.RUSAGE_SELF)
-        # macOS reports ru_maxrss in bytes, Linux in KB
-        peak_rss_mb = rusage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else rusage.ru_maxrss / 1024
+        peak_rss_mb = get_peak_rss_mb()
         print(f"Peak RSS: {peak_rss_mb:.0f} MB")
 
     if failures:
         print(f"\nFAILED: {', '.join(failures)}")
-
-    if summary_payload:
-        summary_path = output_path.with_suffix(".summary.json")
-        with open(summary_path, "w") as f:
-            json.dump(summary_payload, f, indent=2)
-            f.write("\n")
-        print(f"Wrote {summary_path}")
 
     if failures:
         sys.exit(1)

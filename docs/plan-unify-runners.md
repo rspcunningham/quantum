@@ -1,59 +1,107 @@
-# Plan: Unify bench and bench-compare
+# Plan: Migrate To Single `bench` Runner With `--backend`
 
-## Problem
+## Goal
 
-`bench` (run.py) and `bench-compare` (compare.py) are two separate runners that do fundamentally the same thing — run benchmark cases at multiple shot counts and record timings. They diverged in features:
+Keep one benchmark CLI: `bench` (`benchmarks/run.py`), with a configurable backend:
 
-| Feature | `bench` | `bench-compare` |
-|---|---|---|
-| Backends | native only | native + aer + qsim (pluggable) |
-| Reps per shot | 1 | 3 (median reported) |
-| OOM recovery | yes | no |
-| Timeout (`--timeout`) | yes (30s default) | no |
-| Incremental JSONL | yes | no (writes all at end) |
-| Qubit-sorted execution | yes | no |
-| Hotspot analysis | yes | no |
-| Correctness check | at max shots | at max shots |
-| Backend abstraction | calls `run_simulation()` directly | goes through `BackendAdapter` IR layer |
+- `--backend native` (default)
+- `--backend aer`
 
-## Proposal
+We only care about per-case:
 
-Add `--backend` flag to `bench`. Default: `native`. When `--backend aer` or `--backend native aer` is passed, use the `BackendAdapter` layer from compare.py. Deprecate `bench-compare` as a separate entry point.
+- runtime by shot count
+- CPU time / CPU utilization
+- memory metadata
+- status (`PASS`, `FAIL`, `ABORT`) and errors
 
-### Unified interface
+`bench-compare` should be removed after migration.
+
+## Non-Goals
+
+- No multi-backend run in a single command.
+- No median-of-reps feature (`--reps`) in this migration.
+- No compare-style markdown report tooling.
+
+## Target CLI
 
 ```bash
-uv run bench -v                              # native, full suite, 1 rep
-uv run bench -v --backend native aer         # native + aer side-by-side
-uv run bench -v --backend aer --reps 3       # aer only, 3 reps (median)
-uv run bench --core -v --backend native aer  # core-6, both backends
+uv run bench -v
+uv run bench -v --backend native
+uv run bench -v --backend aer
+uv run bench --core -v --backend aer
+uv run bench --cases qft real_grovers --backend aer
 ```
 
-### Implementation
+## Target JSONL Contract
 
-1. Move `BackendAdapter` integration into `run.py`:
-   - When backend is `native` (default): use current `run_case()` path (direct `run_simulation()`)
-   - When backend is non-native or multiple: use `BackendAdapter.prepare()` + `BackendAdapter.run()`
-   - Apply timeout, OOM recovery, incremental writes to all backends
+Current `bench` JSONL schema stays intact, plus:
 
-2. Add `--reps` flag (default 1, used for median when >1)
+- `backend`: `"native"` or `"aer"`
 
-3. Keep `BackendAdapter` abstraction in `benchmarks/backends/` unchanged
+All existing fields used by optimization workflow remain unchanged (`times_s`, `cpu_times_s`, `cpu_util`, `memory`, `correct`, `aborted`, `abort_reason`, `errors`, etc.).
 
-4. Deprecate `bench-compare` entry point (keep as thin wrapper that prints deprecation notice and calls `bench --backend native aer --reps 3`)
+## Implementation Plan
 
-5. Update `bench-compare-report` to work with the unified JSONL format
+1. Add backend flag to `bench`
+   - In `benchmarks/run.py`, add `--backend` with `choices=["native", "aer"]`, default `"native"`.
+   - Print selected backend in run header.
 
-### Output format
+2. Introduce backend runner abstraction inside `run.py`
+   - Keep current native path behavior unchanged.
+   - Add Aer execution path that mirrors native instrumentation:
+     - warmup call
+     - per-shot timing (`time.perf_counter`)
+     - per-shot CPU timing (`time.process_time`)
+     - timeout/abort behavior
+     - correctness check at highest completed shot
+   - Use existing Aer adapter (`benchmarks/backends/aer_adapter.py`) for circuit prep + execution.
 
-Unified JSONL rows include a `backend` field. When multiple backends are used, each case produces one row per backend. Summary totals are printed per-backend.
+3. Preserve status behavior and resilience
+   - Keep OOM handling for native path.
+   - For Aer path, treat runtime exceptions as `ABORT` with explicit `abort_reason`.
+   - Keep incremental JSONL writes (flush each case).
+   - Keep case sorting by qubits and existing summary generation.
 
-### Migration
+4. Keep memory metadata for both backends
+   - Native: existing device memory stats.
+   - Aer: record per-case process memory telemetry (before/after RSS, delta, and process peak RSS).
+   - Also record process memory telemetry for native path to maximize comparability.
+   - Ensure schema consistency so downstream parsing is stable.
 
-- Existing `bench-compare` JSONL files remain readable (already have `backend` field)
-- `bench` JSONL gains a `backend: "native"` field for consistency
-- Progress tracking (`docs/progress-data.md`) continues to use native-backend totals only
+5. Remove `bench-compare` surface area
+   - Remove `bench-compare` entry point from `pyproject.toml`.
+   - Delete `benchmarks/compare.py`.
+   - Remove `bench-compare-report` entry point and delete `benchmarks/compare_report.py`.
+   - Remove qsim support code for now:
+     - delete `benchmarks/backends/qsim_adapter.py`
+     - remove qsim from `benchmarks/backends/__init__.py` registry
+     - remove qsim dependency references from docs and dependency groups where not needed
+   - Update docs (`README.md`, `OPTIMIZE.md`) to use `bench --backend aer` for Aer runs.
+
+6. Compatibility and validation
+   - Run smoke tests:
+     - `uv run bench --cases bell_state --backend native -v`
+     - `uv run bench --cases bell_state --backend aer -v`
+     - `uv run bench --core --backend native`
+   - Verify JSONL rows include backend field and expected status/metrics fields.
+   - Verify progress workflow metrics can be computed directly from JSONL.
+
+## Acceptance Criteria
+
+- `bench` runs successfully with both `--backend native` and `--backend aer`.
+- Output retains required per-case metrics: wall time, CPU, memory, status, errors.
+- Incremental JSONL output remains functional.
+- `bench-compare` command no longer exists.
+- qsim is removed from active benchmark tooling.
+- README/OPTIMIZE docs no longer reference `bench-compare`.
+
+## Migration Order
+
+1. Implement `--backend` in `benchmarks/run.py`.
+2. Validate outputs and summary compatibility.
+3. Remove compare CLI/files and update docs.
+4. Final smoke run for native + aer.
 
 ## Status
 
-Not started. Lower priority than simulation optimization work.
+Implemented (2026-02-11).

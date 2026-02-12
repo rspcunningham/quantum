@@ -4,13 +4,16 @@ Self-contained instructions for running the optimization loop on this quantum si
 
 ## Philosophy
 
-This is a **general-purpose quantum simulator**. The benchmark suite exists to quantify progress, not to define it. Solving for one special case doesn't help — any optimization must improve the simulator's general performance across diverse circuit structures. Clean, DRY, modern Python is paramount; clever-but-messy code that saves a few percent is not worth the maintenance cost.
+This is a **general-purpose quantum simulator**. The benchmark suite exists to quantify progress, not to define it. Solving for one special case doesn't help - any optimization must improve the simulator's general performance across diverse circuit structures. Clean, DRY, modern Python is paramount; clever-but-messy code that saves a few percent is not worth the maintenance cost.
+
+The external reference backend is **Qiskit Aer**, but for the optimization loop it is treated as a fixed baseline dataset. The main question is not "did one case get faster?" but "did native improve broadly while keeping or improving completion rate vs the pinned Aer baseline?"
 
 ## Scope
 
 - **Optimization targets**: `src/quantum/system.py` and `src/quantum/gates.py`. Do not modify benchmark cases or the user-facing API (gate constructors, `run_simulation` signature, `Circuit`/`QuantumRegister` interface).
 - **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases.
-- **Backend**: Apple Silicon MPS via PyTorch. This runs on a MacBook — MPS is the primary target, not CUDA.
+- **Backend**: Apple Silicon MPS via PyTorch. This runs on a MacBook - MPS is the primary target, not CUDA.
+- **Benchmark execution in scope**: run `native` only during normal optimization iterations. `aer` is a pinned reference JSONL used for comparison graphics. qsim is intentionally out of scope for now.
 
 ## The loop
 
@@ -21,7 +24,7 @@ This is a **general-purpose quantum simulator**. The benchmark suite exists to q
 4. Commit     — commit before benchmarking (creates clean audit trail)
 5. Benchmark  — run full suite, evaluate correctness + timing
 6. Evaluate   — compare against prior run, accept or revert
-7. Record     — log outcome and update progress tracking
+7. Record     — log outcome and refresh comparison artifacts
 ```
 
 Each step in detail:
@@ -67,19 +70,12 @@ Before implementing, use external sources to inform your approach. The goal is n
 **DeepWiki** — query open-source codebases for design patterns and implementation details:
 
 ```
-# How does the SOTA target implement something?
-deepwiki ask Qiskit/qiskit-aer "How does Aer's gate fusion work? What is fusion_max_qubit?"
-
 # How does the backend we're targeting actually work?
 deepwiki ask pytorch/pytorch "How does MPS dispatch element-wise ops vs gather/scatter?"
 
-# What does another fast simulator do differently?
-deepwiki ask quantumlib/qsim "How does qsim apply 2-qubit gates to the statevector?"
 ```
 
 Key repos to query:
-- **`Qiskit/qiskit-aer`** — our SOTA comparison target. Gate fusion (up to 5q), AVX2 SIMD kernels, OpenMP parallelization, interleaved real/imag memory layout.
-- **`quantumlib/qsim`** — Google's simulator. Aggressive gate fusion, AVX/FMA vectorization, multi-threaded statevector updates.
 - **`pytorch/pytorch`** — MPS backend internals. How Metal kernels are dispatched, gather/scatter implementation, threshold-based dispatch between custom Metal kernels vs MPSGraph.
 
 **Web search** — find papers, docs, and source code for novel techniques:
@@ -118,9 +114,6 @@ Always commit **before** running benchmarks. This creates a 1:1 mapping between 
 # Full suite with per-case detail (primary command)
 uv run bench -v
 
-# Core-6 only (legacy — saturated at Aer parity)
-uv run bench --core -v
-
 # Custom timeout (default 30s per case per shot count)
 uv run bench -v --timeout 60
 
@@ -128,14 +121,14 @@ uv run bench -v --timeout 60
 uv run bench -v --cases real_grovers qft adaptive_feedback_5q
 ```
 
-The harness runs each case at shot counts `[1, 10, 100, 1000, 10000]` and checks correctness at the highest completed count against expected output distributions. Cases are sorted by qubit count ascending (small/fast first). Each result is flushed to disk immediately for crash resilience.
+`--backend` defaults to `native`. In the optimization loop, do not run `--backend aer`; use the pinned Aer reference JSONL during analysis instead. The harness runs each case at shot counts `[1, 10, 100, 1000, 10000]` and checks correctness at the highest completed count against expected output distributions. Cases are sorted by qubit count ascending (small/fast first). Each result is flushed to disk immediately for crash resilience.
 
 Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted — remaining shots are skipped and the case is excluded from totals. This prevents 20-24q cases from dominating runtime.
 
 **Output**:
-- Per-case: wall time, CPU time, ops/sec, memory, correctness (PASS/FAIL/ABORT)
-- Summary: totals for complete cases only (aborted/OOM cases excluded), split by static/dynamic, hotspot analysis
-- Files: `benchmarks/results/<timestamp>.jsonl` + `.summary.json`
+- Per-case: wall time, CPU time, ops/sec, memory, correctness (`correct` + `errors`), abort metadata
+- Terminal summary: totals for complete cases only (aborted/OOM cases excluded), split by static/dynamic, hotspot analysis
+- File: `benchmarks/results/<timestamp>.jsonl`
 
 ### 6. Evaluate
 
@@ -144,46 +137,29 @@ Compare the new run against the prior baseline:
 - **Broad improvement**: check static totals AND dynamic totals at both @1000 and @10000. An optimization that helps one family but regresses another is suspect.
 - **Shot scaling**: compare @1000 vs @10000 for static circuits. If they scale linearly, unitary evolution is leaking into the shot loop (an algorithmic bug, not a micro-optimization problem).
 - **Cases complete**: compare against the prior run's `cases_complete` count. More complete cases = progress. Fewer = regression.
-
-For SOTA comparison against Qiskit Aer and Google qsim:
-
-```bash
-# Full suite: native vs Aer (3 reps, median reported)
-uv run bench-compare -v
-
-# Core-6 only
-uv run bench-compare --core -v
-
-# Static-only: native vs Aer vs qsim
-uv run bench-compare --suite static --backends native aer qsim -v
-
-# Specific cases only
-uv run bench-compare --cases bell_state qft -v
-
-# Generate markdown report from a compare JSONL
-uv run bench-compare-report benchmarks/results/compare-<timestamp>.jsonl
-```
+- **Head-to-head vs Aer (hero metric)**: compare the latest native JSONL against the pinned Aer reference JSONL. Compute per-cell ratio `aer_runtime / native_runtime` for each `(case, shots)` cell. Aggregate with geometric mean by shot and overall. Values `>1` mean native is faster. For aborted/missing shot cells, use timeout-censoring at the run timeout (default 30s) so aborts are penalized instead of silently dropped.
+- **Coverage**: track the fraction of cases with a concrete runtime at each shot count for each backend. Higher coverage means fewer aborts/timeouts.
 
 ### 7. Record
 
-After each iteration, update three things:
+After each optimization iteration, update the artifacts that drive decisions:
 
-**a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metric, verdict. The result metric is the full-suite total @1000 for complete cases (format: `Xs (N cases)`).
+**a) Experiment log** - append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metric, verdict. The result metric is the full-suite total @1000 for complete cases (format: `Xs (N cases)`).
 
-**b) Progress data table** — if the iteration was successful (worked), append a row to `docs/progress-data.md`. Extract the data from the `.summary.json` file written alongside the JSONL:
-- `total_*_s` columns: from `totals_s.all` (these already exclude aborted/incomplete cases)
-- `cases_complete`: from `counts.cases_complete`
-- `checkpoint_jsonl`: the JSONL filename (e.g., `2026-02-11T172533.jsonl`)
-- `git_hash`: from any result row's `git_hash` field
-- `label_x`: format as `` `{git_hash}\n{MM-DD}T{HHMM}` `` (extracted from the JSONL filename timestamp)
+**b) Native vs Aer comparison graphics (required for README narrative)**:
+1. Run full suite for native only (`uv run bench -v`) and use the latest native JSONL.
+2. Use the pinned Aer reference JSONL: `benchmarks/results/2026-02-11T211659.jsonl`.
+3. Read both JSONL files directly. Do **not** depend on `summary.json` sidecars.
+4. Generate the following files with one-off, ephemeral analysis code:
+   - `docs/native-vs-aer-hero.png`: shot-level geometric-mean ratio (`aer/native`) plus overall headline ratio.
+   - `docs/native-vs-aer-heatmap.png`: per-case, per-shot heatmap of `aer/native` (e.g., `log2` color scale).
+5. Read both images after generation and verify they render correctly.
+6. Update the README section that explains these graphs with concrete numbers from the latest pair of JSONLs.
+7. Only refresh the pinned Aer JSONL in a separate maintenance pass (e.g., benchmark suite/harness/environment change), not in normal optimization iterations.
 
-Alternatively, compute totals directly from the JSONL: for each shot count, sum `times_s[shot]` across all rows where `aborted` is `false` and all 5 shot counts are present in `times_s`.
+Do not commit helper scripts for this. Keep the analysis ephemeral and data-driven.
 
-Core-6 tracking is legacy (saturated). The core-6 data lives in `docs/progress-data-core.md` — do not update it during normal optimization iterations.
-
-**c) Progress chart** — first, **read the existing `docs/progress.png`** to see what the current chart looks like. Then regenerate it from the updated `docs/progress-data.md`. Write a one-off Python script that reads the table, plots the series (log-scale Y, one line per shot count), and saves the PNG. Use `matplotlib` (available in the project venv). Don't commit the script — just run it ephemerally and commit the resulting image. After generating, **read the new image** to verify it looks correct and to inform your next hypothesis — the shape of the curves tells you where the remaining headroom is.
-
-The chart must include **SOTA reference lines** from the "SOTA Reference — Qiskit Aer (Full Suite)" section in `docs/progress-data.md`. For each shot count that has a non-null `aer_total_s` value, plot a horizontal dashed line at that Y value spanning the full X range. Use the same color as the corresponding shot-count series line, with `linestyle='--'`, `alpha=0.4`, `linewidth=1`. Do **not** add the SOTA lines to the legend — instead, place a single italic "Aer" text annotation at the right edge of the plot, vertically centered on the geometric mean of the Aer values (using `ax.annotate` with `xycoords=('axes fraction', 'data')`). If all Aer values are `null`, skip the SOTA lines silently.
+**c) Progress chart (legacy tracking, optional)** - `docs/progress-data.md` / `docs/progress.png` remain useful for historical trend lines across optimization checkpoints, but they are not the primary Aer comparison artifact.
 
 ## Interpreting results
 
@@ -208,13 +184,14 @@ The chart must include **SOTA reference lines** from the "SOTA Reference — Qis
 | `src/quantum/qasm.py` | QASM 2.0 parser |
 | `benchmarks/run.py` | Benchmark harness (`bench`) |
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
-| `benchmarks/compare.py` | SOTA comparison (`bench-compare`) |
 | `benchmarks/cases/` | Hand-coded benchmark case definitions — do not modify |
 | `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
 | `benchmarks/expected/` | Expected distributions from Aer |
 | `benchmarks/generate_circuits.py` | QASM circuit generator |
 | `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log (what was tried, what worked, what didn't) |
+| `docs/native-vs-aer-hero.png` | Headline native-vs-aer comparison graphic |
+| `docs/native-vs-aer-heatmap.png` | Per-case/per-shot native-vs-aer comparison heatmap |
 | `docs/progress-data.md` | Full-suite progress chart data |
 | `docs/progress-data-core.md` | Core-6 progress chart data (legacy, saturated) |
 
