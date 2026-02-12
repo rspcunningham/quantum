@@ -623,6 +623,19 @@ def _counts_from_dynamic_branch_paths(
     return counts
 
 
+_binary_string_lut: dict[int, list[str]] = {}
+
+
+def _get_binary_string_lut(n_bits: int) -> list[str]:
+    """Get or build a lookup table mapping code → binary string for n_bits ≤ 16."""
+    lut = _binary_string_lut.get(n_bits)
+    if lut is None:
+        fmt = f"0{n_bits}b"
+        lut = [format(i, fmt) for i in range(1 << n_bits)]
+        _binary_string_lut[n_bits] = lut
+    return lut
+
+
 def _counts_from_register_codes(
     register_codes: torch.Tensor,
     *,
@@ -636,16 +649,18 @@ def _counts_from_register_codes(
         return {"": num_shots}
 
     if n_bits <= 16:
+        lut = _get_binary_string_lut(n_bits)
         histogram = torch.bincount(register_codes, minlength=1 << n_bits)
         nonzero_codes = torch.nonzero(histogram, as_tuple=False).flatten()
         if nonzero_codes.numel() == 0:
             return {}
-        codes_np = nonzero_codes.numpy().astype(np.int64)
+        codes_list = nonzero_codes.tolist()
         counts_list = histogram[nonzero_codes].to(dtype=torch.int64).tolist()
-    else:
-        unique_codes, unique_counts = torch.unique(register_codes, return_counts=True, sorted=True)
-        codes_np = unique_codes.numpy().astype(np.int64)
-        counts_list = unique_counts.tolist()
+        return {lut[c]: ct for c, ct in zip(codes_list, counts_list)}
+
+    unique_codes, unique_counts = torch.unique(register_codes, return_counts=True, sorted=True)
+    codes_np = unique_codes.numpy().astype(np.int64)
+    counts_list = unique_counts.tolist()
 
     # Vectorized binary string formatting: extract all bits via numpy broadcast,
     # then bulk-convert to ASCII bytes. Decode once to str and use str slicing
