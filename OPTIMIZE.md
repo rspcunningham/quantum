@@ -47,11 +47,6 @@ uv run bench-trace random_universal_14 1000 --no-stack
 
 Output: a `torch.profiler` table (top 20 ops by CPU time) printed to stdout, plus a Chrome/Perfetto trace JSON at `benchmarks/results/trace_<case>_<shots>.json`. Open traces at `chrome://tracing` or `https://ui.perfetto.dev`.
 
-Focus on:
-- Which `aten::*` ops dominate self CPU time
-- Whether the bottleneck is compute (`mm`, `mul`) or movement (`copy_`, `to`, `_to_copy`)
-- Whether the bottleneck is indexing/control flow (`nonzero`, `index_put_`, `item`)
-
 ### 2. Hypothesize
 
 Before writing any code, state:
@@ -75,9 +70,6 @@ deepwiki ask pytorch/pytorch "How does MPS dispatch element-wise ops vs gather/s
 
 ```
 
-Key repos to query:
-- **`pytorch/pytorch`** — MPS backend internals. How Metal kernels are dispatched, gather/scatter implementation, threshold-based dispatch between custom Metal kernels vs MPSGraph.
-
 **Web search** — find papers, docs, and source code for novel techniques:
 
 ```
@@ -90,12 +82,6 @@ WebSearch "pytorch MPS backend Metal kernel dispatch performance"
 # Pull and read a specific paper or source file
 WebFetch <url> "Extract the key optimization techniques described..."
 ```
-
-Known leads from prior research:
-- **DiaQ** (arxiv 2405.01250): sparse diagonal format for statevector simulation. Most gates touch only a few diagonals of the full unitary. `O(d*N)` instead of dense matmul. 40-69% speedups reported. Our stride-based slicing is a hand-rolled version of this for 1q/2q — the DiaQ framework suggests generalizing further.
-- **QMin** (Springer 2025): cost-aware fusion — deciding *when* fusion helps vs hurts based on gate count and qubit count.
-- **BQSim** (ASPLOS 2025): decision-diagram based batch simulation exploiting gate matrix regularity/sparsity.
-- **MPS gather/scatter**: implemented as custom Metal kernels with 1 thread per element via `mtl_dispatch1DJob`. No explicit WAR hazard tracking — relies on Metal's automatic tracking, which doesn't catch intra-buffer dependencies (explains F6 failure).
 
 ### 3. Implement
 
@@ -114,16 +100,13 @@ Always commit **before** running benchmarks. This creates a 1:1 mapping between 
 # Full suite with per-case detail (primary command)
 uv run bench -v
 
-# Custom timeout (default 30s per case per shot count)
-uv run bench -v --timeout 60
-
 # Run specific cases only (for quick iteration during development)
 uv run bench -v --cases real_grovers qft adaptive_feedback_5q
 ```
 
 `--backend` defaults to `native`. In the optimization loop, do not run `--backend aer`; use the pinned Aer reference JSONL during analysis instead. The harness runs each case at shot counts `[1, 10, 100, 1000, 10000]` and checks correctness at the highest completed count against expected output distributions. Cases are sorted by qubit count ascending (small/fast first). Each result is flushed to disk immediately for crash resilience.
 
-Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted — remaining shots are skipped and the case is excluded from totals. This prevents 20-24q cases from dominating runtime.
+Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted — remaining shots are skipped and the case is excluded from totals.
 
 **Output**:
 - Per-case: wall time, CPU time, ops/sec, memory, correctness (`correct` + `errors`), abort metadata
@@ -134,8 +117,6 @@ Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted �
 
 Compare the new run against the prior baseline:
 - **Correctness**: all complete cases must PASS. Any correctness failure (FAIL) is a hard blocker — revert immediately. Aborted cases (OOM or timeout) are not failures; they're excluded from totals and don't cause exit code 1. However, the long-term goal is **zero aborted cases** — every case should complete within the timeout. If a previously-passing case now gets aborted, that's a performance regression.
-- **Broad improvement**: check static totals AND dynamic totals at both @1000 and @10000. An optimization that helps one family but regresses another is suspect.
-- **Shot scaling**: compare @1000 vs @10000 for static circuits. If they scale linearly, unitary evolution is leaking into the shot loop (an algorithmic bug, not a micro-optimization problem).
 - **Cases complete**: compare against the prior run's `cases_complete` count. More complete cases = progress. Fewer = regression.
 - **Head-to-head vs Aer (hero metric)**: compare the latest native JSONL against the pinned Aer reference JSONL. Compute per-cell ratio `aer_runtime / native_runtime` for each `(case, shots)` cell. Aggregate with geometric mean by shot and overall. Values `>1` mean native is faster. For aborted/missing shot cells, use timeout-censoring at the run timeout (default 30s) so aborts are penalized instead of silently dropped.
 - **Coverage**: track the fraction of cases with a concrete runtime at each shot count for each backend. Higher coverage means fewer aborts/timeouts.
@@ -165,16 +146,7 @@ Do not commit helper scripts for this. Keep the analysis ephemeral and data-driv
 
 ## Interpreting results
 
-**Shot counts** `[1, 10, 100, 1000, 10000]` surface different behaviors:
-- Low shots (1, 10): dominated by fixed overhead (compilation, device transfer, warmup)
-- High shots (1000, 10000): dominated by per-shot or per-evolution costs
-
-**Static vs dynamic**: the harness classifies circuits automatically:
-- **Static**: no conditionals, terminal-only measurements → eligible for evolve-once/sample-many fast path
-- **Dynamic**: mid-circuit measurements and/or conditional gates → requires branch-based execution
-
-**Known failures**: `ghz_state_16` and `ghz_state_18` fail on MPS due to a tensor rank limit (MPS supports rank ≤ 16). These are backend-limit failures, not correctness bugs.
-
+**Shot counts** `[1, 10, 100, 1000, 10000]` surface different behaviors
 **Abort handling**: Cases that OOM or exceed `--timeout` at any shot count break out of the shot ladder early. Aborted cases are excluded from totals — only cases completing all 5 shot counts are summed. Results are written incrementally to JSONL, so even if a large case causes an OS-level kill (exit 137), all prior results are preserved.
 
 ## Key files
