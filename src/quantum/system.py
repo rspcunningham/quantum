@@ -733,7 +733,10 @@ def _sample_terminal_measurements_from_branches(
         if sampling_probs.device.type == "mps":
             sampling_probs = sampling_probs.to("cpu")
 
-        samples = torch.multinomial(sampling_probs, shots, replacement=True).to(dtype=torch.int64)
+        # Avoid PyTorch multinomial performance cliff at num_samples=1
+        # (13x slower than num_samples=2 on 16M categories due to different code path).
+        actual_samples = max(shots, 2)
+        samples = torch.multinomial(sampling_probs, actual_samples, replacement=True)[:shots].to(dtype=torch.int64)
         register_codes = torch.full((shots,), classical_value, dtype=torch.int64, device=samples.device)
 
         for qubit_shift, bit_shift in measurement_specs:
