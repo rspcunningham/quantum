@@ -1037,6 +1037,131 @@ def _single_qubit_gate_runtime_cost(gate: Gate) -> float:
     return 1.0
 
 
+def _fuse_gates_into_blocks(
+    gates: tuple[Gate, ...],
+    n_qubits: int,
+    max_block_qubits: int = 5,
+) -> tuple[Gate, ...]:
+    """Fuse consecutive gates into multi-qubit unitary blocks.
+
+    Greedily groups consecutive gates whose combined qubit set fits within
+    *max_block_qubits*.  Each group is compiled into a single 2^K × 2^K
+    unitary matrix (via numpy), producing a dense Gate that is applied
+    through the tensordot path in one GPU dispatch.
+
+    Benefits over per-type fusion (diagonal/permutation/1q):
+      • Compilation cost is O(blocks × 2^(2K)) — independent of n_qubits.
+      • Replaces thousands of tiny GPU kernel launches with hundreds of
+        larger tensor contractions, dramatically improving GPU utilization.
+      • Handles all gate types uniformly (diagonal, permutation, dense).
+    """
+    n = len(gates)
+    if n < 2:
+        return gates
+
+    result: list[Gate] = []
+    block_qubit_set: set[int] = set()
+    block_qubits: list[int] = []  # sorted
+    block_gates: list[Gate] = []
+
+    identity_cache: dict[int, np.ndarray] = {}
+
+    def _get_identity(dim: int) -> np.ndarray:
+        cached = identity_cache.get(dim)
+        if cached is None:
+            cached = np.eye(dim, dtype=np.complex64)
+            identity_cache[dim] = cached
+        return cached
+
+    def _embed_gate(gate: Gate, block_q: list[int], k: int) -> np.ndarray:
+        """Build the 2^k × 2^k matrix for a gate within a k-qubit block."""
+        g_nq = len(gate.targets)
+        g_dim = 1 << g_nq
+        g_mat = _gate_to_np_matrix(gate, g_dim)
+        local_targets = [block_q.index(t) for t in gate.targets]
+
+        if g_nq == k and local_targets == list(range(k)):
+            return g_mat
+
+        dim = 1 << k
+        indices = np.arange(dim, dtype=np.int64)
+
+        # Extract sub-indices for all basis states at once
+        sub_idx = np.zeros(dim, dtype=np.int64)
+        for p, lt in enumerate(local_targets):
+            sub_idx |= ((indices >> (k - 1 - lt)) & 1) << (g_nq - 1 - p)
+
+        # Build full matrix by iterating over output sub-states
+        G = np.zeros((dim, dim), dtype=np.complex64)
+        for new_sub in range(g_dim):
+            new_indices = indices.copy()
+            for p, lt in enumerate(local_targets):
+                bit_val = (new_sub >> (g_nq - 1 - p)) & 1
+                bp = k - 1 - lt
+                new_indices = (new_indices & ~(1 << bp)) | (bit_val << bp)
+            G[new_indices, indices] += g_mat[new_sub, sub_idx]
+        return G
+
+    def _close_block() -> None:
+        nonlocal block_qubit_set, block_qubits, block_gates
+        if not block_gates:
+            return
+        if len(block_gates) == 1:
+            result.append(block_gates[0])
+        else:
+            k = len(block_qubits)
+            dim = 1 << k
+            U = _get_identity(dim).copy()
+            for g in block_gates:
+                G = _embed_gate(g, block_qubits, k)
+                U = G @ U
+
+            # Near-identity → drop entirely
+            if np.allclose(U, _get_identity(dim), atol=1e-6):
+                pass
+            else:
+                # Check if result is diagonal
+                off_diag = U.copy()
+                np.fill_diagonal(off_diag, 0)
+                if np.allclose(off_diag, 0, atol=1e-8):
+                    diag = np.diag(U).astype(np.complex64)
+                    g_out = object.__new__(Gate)
+                    g_out._tensor = None
+                    g_out._diagonal = torch.from_numpy(diag)
+                    g_out._permutation = None
+                    g_out._permutation_factors = None
+                    g_out.targets = list(block_qubits)
+                    result.append(g_out)
+                else:
+                    tensor = torch.tensor(U, dtype=torch.complex64)
+                    g_out = object.__new__(Gate)
+                    g_out._tensor = tensor
+                    g_out._diagonal = None
+                    g_out._permutation = None
+                    g_out._permutation_factors = None
+                    g_out.targets = list(block_qubits)
+                    result.append(g_out)
+        block_qubit_set = set()
+        block_qubits = []
+        block_gates = []
+
+    for gate in gates:
+        gate_qubits = set(gate.targets)
+        merged = block_qubit_set | gate_qubits
+        if len(merged) <= max_block_qubits:
+            block_qubit_set = merged
+            block_qubits = sorted(merged)
+            block_gates.append(gate)
+        else:
+            _close_block()
+            block_qubit_set = gate_qubits
+            block_qubits = sorted(gate_qubits)
+            block_gates = [gate]
+
+    _close_block()
+    return tuple(result)
+
+
 def _two_qubit_gate_runtime_cost(gate: Gate) -> float:
     """Relative runtime cost model for 2q gate application."""
     if gate.permutation is not None:
@@ -3085,17 +3210,17 @@ def _run_compiled_simulation(
             if n_qubits <= cpu_threshold:
                 device = torch.device("cpu")
 
-        # Preprocess: always run inverse cancellation; gate-fusion passes are
-        # enabled only when their compile-time cost is likely to be amortized.
+        # Preprocess: cancel inverse pairs, then fuse gate sequences.
+        # Cheap local passes run broadly; expensive 2^n passes stay behind
+        # an amortization guard. For larger systems, block fusion replaces
+        # heavy diagonal/permutation materialization.
         run_heavy_fusion = _should_run_heavy_compile_fusions(compiled, n_qubits=n_qubits)
+        _use_block_fusion = n_qubits >= 14
         fused_steps = []
         any_changed = False
         for step in compiled.steps:
             if isinstance(step, _DynamicSegmentStep):
-                # Pre-pass: cancel adjacent inverse pairs on raw gates.
-                # For roundtrip circuits (U @ U†), the palindrome structure
-                # collapses via cheap 2x2/4x4 matrix checks, avoiding the
-                # expensive full-state diagonal array construction below.
+                # Always cancel inverse pairs first (cheap, handles roundtrips)
                 fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
                 # Cheap diagonal-run fusion: collapse repeated 1q/2q diagonal
                 # gates (e.g. RZ/CZ layers) by target without 2^n materialization.
@@ -3110,7 +3235,9 @@ def _run_compiled_simulation(
                     fused_gates = _fuse_segment_dense_pair_regions(fused_gates)
                     fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
                     fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
-                if run_heavy_fusion:
+                if _use_block_fusion:
+                    fused_gates = _fuse_gates_into_blocks(fused_gates, n_qubits)
+                elif run_heavy_fusion:
                     fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
                     fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
                     fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
@@ -3127,8 +3254,7 @@ def _run_compiled_simulation(
                 node_count=compiled.node_count,
                 terminal_measurements=compiled.terminal_measurements,
             )
-            # Pre-transfer fused tensors to MPS before main loop to avoid
-            # large CPU→MPS copies during interleaved gate application
+            # Pre-transfer fused tensors to device before main loop
             for step in compiled.steps:
                 if isinstance(step, _DynamicSegmentStep):
                     for gate in step.gates:
@@ -3138,6 +3264,12 @@ def _run_compiled_simulation(
                             gate._permutation = gate._permutation.to(dtype=torch.int64, device=device)
                             if gate._permutation_factors is not None:
                                 gate._permutation_factors = gate._permutation_factors.to(device)
+                        # Pre-transfer block unitary tensors to device
+                        if (gate._tensor is not None
+                                and len(gate.targets) > 2
+                                and gate._diagonal is None
+                                and gate._permutation is None):
+                            gate._tensor = gate._tensor.to(device)
 
         # Pre-compute initial state for leading 1q-only blocks on distinct qubits.
         # For circuits starting with H_all or similar patterns, the resulting state
@@ -3578,15 +3710,105 @@ class BatchedQuantumSystem:
         if k == 2:
             return self._apply_dense_two_qubit_gate(gate, targets)
 
-        gate_nd = self._device_gate_tensor(gate.tensor, n_target_qubits=k)
+        return self._apply_block_gate(gate, targets)
 
-        state = self.state_vectors.view((self.batch_size,) + (2,) * self.n_qubits)
-        axes = tuple(t + 1 for t in targets)
-        state = torch.tensordot(state, gate_nd, dims=(axes, list(range(k, 2 * k))))
-        state = torch.movedim(state, list(range(-k, 0)), list(axes))
+    def _apply_block_gate(
+        self, gate: Gate, targets: tuple[int, ...],
+    ) -> "BatchedQuantumSystem":
+        """Apply a multi-qubit fused block gate via permute-matmul-unpermute.
+
+        Reshapes the flat state vector into an interleaved layout with one
+        axis per target qubit plus gap dimensions between them.  The number
+        of resulting dimensions is 2K+2 (K = number of target qubits), which
+        stays within MPS's 16-dim limit for K ≤ 7.
+
+        The target axes are permuted to the end so the state becomes
+        ``(batch, n_groups, block_dim)``; a single batched matmul applies
+        the fused unitary; then the axes are permuted back.
+        """
+        sorted_targets = sorted(targets)
+        k = len(sorted_targets)
+        block_dim = 1 << k
+        n_groups = (1 << self.n_qubits) // block_dim
+
+        # Build interleaved dimensions: gap0, 2, gap1, 2, ..., gapK
+        dims: list[int] = []
+        target_axes: list[int] = []
+        gap_dims: list[int] = []
+        prev = 0
+        for t in sorted_targets:
+            gap = t - prev
+            g_dim = 1 << gap
+            dims.append(g_dim)
+            gap_dims.append(g_dim)
+            dims.append(2)
+            target_axes.append(len(dims))  # 1-based (batch is 0)
+            prev = t + 1
+        trailing = self.n_qubits - prev
+        t_dim = 1 << trailing
+        dims.append(t_dim)
+        gap_dims.append(t_dim)
+
+        state = self.state_vectors.view(self.batch_size, *dims)
+
+        # Permute target 2-axes to the end
+        all_axes = list(range(1, len(dims) + 1))
+        non_target = [a for a in all_axes if a not in target_axes]
+        fwd_perm = [0] + non_target + target_axes
+        state = state.permute(fwd_perm).contiguous()
+
+        # Batched matmul: (batch, n_groups, block_dim) @ (block_dim, block_dim)^T
+        state = state.reshape(self.batch_size, n_groups, block_dim)
+
+        # Handle target qubit ordering: if gate.targets differs from sorted,
+        # permute the gate matrix columns/rows to match the sorted layout.
+        gate_mat = self._device_block_matrix(gate, sorted_targets, k)
+        state = torch.matmul(state, gate_mat.mT)
+
+        # Reshape to multi-dim, permute back, flatten
+        state = state.reshape(self.batch_size, *gap_dims, *([2] * k))
+        inv_perm = [0] * (len(dims) + 1)
+        for new_pos, old_pos in enumerate(fwd_perm):
+            inv_perm[old_pos] = new_pos
+        state = state.permute(inv_perm).contiguous()
 
         self.state_vectors = state.reshape(self.batch_size, -1)
         return self
+
+    def _device_block_matrix(
+        self, gate: Gate, sorted_targets: list[int], k: int,
+    ) -> torch.Tensor:
+        """Get the block-dim × block-dim gate matrix on device.
+
+        If the gate's target ordering differs from *sorted_targets*,
+        permute rows/columns of the matrix so that the sorted layout is
+        used during the batched matmul.
+        """
+        key = id(gate.tensor)
+        cached = self._gate_tensors.get(key)
+        if cached is not None:
+            return cached
+
+        block_dim = 1 << k
+        mat = gate.tensor.reshape(block_dim, block_dim)
+
+        # If gate targets are not in sorted order, remap
+        if list(gate.targets) != sorted_targets:
+            target_to_pos = {t: i for i, t in enumerate(gate.targets)}
+            sorted_pos = [target_to_pos[t] for t in sorted_targets]
+            # Build a permutation on the block basis states
+            perm = torch.zeros(block_dim, dtype=torch.long)
+            for idx in range(block_dim):
+                new_idx = 0
+                for p, sp in enumerate(sorted_pos):
+                    bit = (idx >> (k - 1 - p)) & 1
+                    new_idx |= bit << (k - 1 - sp)
+                perm[idx] = new_idx
+            mat = mat[perm][:, perm]
+
+        mat = mat.to(dtype=torch.complex64, device=self.device)
+        self._gate_tensors[key] = mat
+        return mat
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
         """Apply a dense single-qubit gate."""
