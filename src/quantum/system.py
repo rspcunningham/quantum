@@ -648,9 +648,14 @@ def _counts_from_register_codes(
     if n_bits == 0:
         return {"": num_shots}
 
-    if n_bits <= 16:
+    # Use bincount when histogram is dense relative to sample count (dim ≤ 2*shots),
+    # otherwise use torch.unique which is O(K log K) instead of O(2^n).
+    dim = 1 << n_bits
+    use_bincount = n_bits <= 16 and dim <= num_shots * 2
+
+    if use_bincount:
         lut = _get_binary_string_lut(n_bits)
-        histogram = torch.bincount(register_codes, minlength=1 << n_bits)
+        histogram = torch.bincount(register_codes, minlength=dim)
         nonzero_codes = torch.nonzero(histogram, as_tuple=False).flatten()
         if nonzero_codes.numel() == 0:
             return {}
@@ -659,6 +664,11 @@ def _counts_from_register_codes(
         return {lut[c]: ct for c, ct in zip(codes_list, counts_list)}
 
     unique_codes, unique_counts = torch.unique(register_codes, return_counts=True, sorted=True)
+
+    if n_bits <= 16:
+        lut = _get_binary_string_lut(n_bits)
+        return {lut[c]: ct for c, ct in zip(unique_codes.tolist(), unique_counts.tolist())}
+
     codes_np = unique_codes.numpy().astype(np.int64)
     counts_list = unique_counts.tolist()
 
