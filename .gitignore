@@ -9,6 +9,3 @@ wheels/
 # Virtual environments
 .venv
 .claude
-
-# Benchmark artifacts (local-only)
-benchmarks/results/

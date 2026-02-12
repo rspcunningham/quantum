@@ -17,15 +17,11 @@ The core-6 reached Aer parity - these small circuits (2-13 qubits, 4-184 gates) 
 
 ### Full suite (156 cases - active optimization target)
 
-![Full-suite optimization progress](docs/progress.png)
-
 Full-suite progress data: [`docs/progress-data.md`](docs/progress-data.md). Core-6 data: [`docs/progress-data-core.md`](docs/progress-data-core.md). Detailed run log: [`docs/experiment-log.md`](docs/experiment-log.md).
 
 ### Native vs Aer (current full-run comparison)
 
-![Native vs Aer hero comparison](docs/native-vs-aer-hero.png)
-
-![Native vs Aer per-case heatmap](docs/native-vs-aer-heatmap.png)
+![Native vs Aer comparison](docs/native-vs-aer.png)
 
 Based on:
 - Native: `benchmarks/results/2026-02-11T203633.jsonl`
@@ -91,7 +87,7 @@ Cases are sorted by qubit count (small first) and results are written incrementa
 
 ### SOTA comparison
 
-Use the same `bench` runner with `--backend aer` to collect Aer timings with the same per-case telemetry. The primary comparison artifacts are the two PNGs above, generated directly from paired JSONL runs.
+Use the same `bench` runner with `--backend aer` to collect Aer timings with the same per-case telemetry. The primary comparison artifact is the combined figure above, generated directly from paired JSONL runs.
 
 ## Optimization workflow
 
@@ -117,5 +113,6 @@ See `examples/` for standalone scripts: a Bell state, a simple Grover's search, 
 | `benchmarks/generate_circuits.py` | QASM circuit generator |
 | `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log |
+| `docs/native-vs-aer.png` | Combined native-vs-aer comparison (hero + heatmap) |
 | `docs/progress-data.md` | Full-suite progress chart data |
 | `docs/progress-data-core.md` | Core-6 progress chart data |

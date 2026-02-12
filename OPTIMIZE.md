@@ -146,15 +146,15 @@ After each optimization iteration, update the artifacts that drive decisions:
 
 **a) Experiment log** - append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metric, verdict. The result metric is the full-suite total @1000 for complete cases (format: `Xs (N cases)`).
 
-**b) Native vs Aer comparison graphics (required for README narrative)**:
+**b) Native vs Aer comparison graphic (required for README narrative)**:
 1. Run full suite for native only (`uv run bench -v`) and use the latest native JSONL.
 2. Use the pinned Aer reference JSONL: `benchmarks/results/2026-02-11T211659.jsonl`.
-3. Read both JSONL files directly. Do **not** depend on `summary.json` sidecars.
-4. Generate the following files with one-off, ephemeral analysis code:
-   - `docs/native-vs-aer-hero.png`: shot-level geometric-mean ratio (`aer/native`) plus overall headline ratio.
-   - `docs/native-vs-aer-heatmap.png`: per-case, per-shot heatmap of `aer/native` (e.g., `log2` color scale).
-5. Read both images after generation and verify they render correctly.
-6. Update the README section that explains these graphs with concrete numbers from the latest pair of JSONLs.
+3. Read both JSONL files directly.
+4. Generate `docs/native-vs-aer.png` with one-off, ephemeral analysis code. This is a single figure with two subplots side by side:
+   - **Left subplot**: shot-level geometric-mean ratio bar chart (`aer/native`) plus overall headline ratio.
+   - **Right subplot**: per-case, per-shot heatmap of `aer/native` on a `log2` color scale (green = native faster, red = Aer faster).
+5. Read the image after generation and verify it renders correctly.
+6. Update the README section that explains the graph with concrete numbers from the latest pair of JSONLs.
 7. Only refresh the pinned Aer JSONL in a separate maintenance pass (e.g., benchmark suite/harness/environment change), not in normal optimization iterations.
 
 Do not commit helper scripts for this. Keep the analysis ephemeral and data-driven.
@@ -190,8 +190,7 @@ Do not commit helper scripts for this. Keep the analysis ephemeral and data-driv
 | `benchmarks/generate_circuits.py` | QASM circuit generator |
 | `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
 | `docs/experiment-log.md` | Experiment log (what was tried, what worked, what didn't) |
-| `docs/native-vs-aer-hero.png` | Headline native-vs-aer comparison graphic |
-| `docs/native-vs-aer-heatmap.png` | Per-case/per-shot native-vs-aer comparison heatmap |
+| `docs/native-vs-aer.png` | Combined native-vs-aer comparison (hero + heatmap) |
 | `docs/progress-data.md` | Full-suite progress chart data |
 | `docs/progress-data-core.md` | Core-6 progress chart data (legacy, saturated) |
 
