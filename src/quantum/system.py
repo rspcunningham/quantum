@@ -207,89 +207,160 @@ def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gat
     return tuple(result)
 
 
-def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
-    """Fuse consecutive single-qubit gates on the same qubit into one gate.
+def _gate_to_np_matrix(gate: Gate, dim: int) -> np.ndarray:
+    """Convert a gate to its dim x dim numpy matrix representation."""
+    if gate.diagonal is not None:
+        return np.diag(gate.diagonal.numpy().astype(np.complex64))
+    if gate.permutation is not None:
+        perm = gate.permutation.numpy()
+        mat = np.zeros((dim, dim), dtype=np.complex64)
+        pf = gate.permutation_factors
+        for i in range(dim):
+            mat[i, int(perm[i])] = complex(pf[i]) if pf is not None else 1.0
+        return mat
+    return gate.tensor.reshape(dim, dim).numpy().astype(np.complex64)
 
-    Handles dense, diagonal, and permutation 1q gates by converting each to
-    its 2x2 matrix, multiplying at compile time (numpy), and emitting a single
-    fused gate.  Near-identity results are dropped entirely.
+
+def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
+    """Fuse single-qubit gates within contiguous 1q-only regions.
+
+    Within a region of consecutive 1q gates, all gates on different qubits
+    commute.  Group by target qubit and fuse each qubit's chain into a single
+    gate.  Near-identity results are dropped entirely.
     """
     n = len(gates)
     if n < 2:
         return gates
 
-    # Quick scan: any fusible pair?
-    has_fusion = False
-    for i in range(n - 1):
-        if (
-            len(gates[i].targets) == 1
-            and len(gates[i + 1].targets) == 1
-            and gates[i].targets[0] == gates[i + 1].targets[0]
-        ):
-            has_fusion = True
-            break
-    if not has_fusion:
+    # Quick scan: any 1q-only region of length >= 2?
+    has_region = False
+    i = 0
+    while i < n:
+        if len(gates[i].targets) == 1:
+            j = i + 1
+            while j < n and len(gates[j].targets) == 1:
+                j += 1
+            if j - i >= 2:
+                has_region = True
+                break
+            i = j
+        else:
+            i += 1
+    if not has_region:
         return gates
-
-    def _gate_to_2x2(gate: Gate) -> np.ndarray:
-        if gate.diagonal is not None:
-            d = gate.diagonal.numpy().astype(np.complex64)
-            return np.array([[d[0], 0], [0, d[1]]], dtype=np.complex64)
-        if gate.permutation is not None:
-            perm = gate.permutation.numpy()
-            mat = np.zeros((2, 2), dtype=np.complex64)
-            pf = gate.permutation_factors
-            for idx in range(2):
-                mat[idx, int(perm[idx])] = complex(pf[idx]) if pf is not None else 1.0
-            return mat
-        return gate.tensor.reshape(2, 2).numpy().astype(np.complex64)
 
     identity_2x2 = np.eye(2, dtype=np.complex64)
     result: list[Gate] = []
     i = 0
     while i < n:
-        gate = gates[i]
-        if len(gate.targets) != 1:
-            result.append(gate)
+        if len(gates[i].targets) != 1:
+            result.append(gates[i])
             i += 1
             continue
 
-        target = gate.targets[0]
-        j = i + 1
-        while j < n and len(gates[j].targets) == 1 and gates[j].targets[0] == target:
+        # Find extent of contiguous 1q-only region
+        j = i
+        while j < n and len(gates[j].targets) == 1:
             j += 1
 
         if j - i == 1:
-            result.append(gate)
-            i += 1
-            continue
-
-        # Fuse gates[i:j] into single 2x2
-        mat = _gate_to_2x2(gates[i])
-        for k in range(i + 1, j):
-            mat = _gate_to_2x2(gates[k]) @ mat
-
-        # Near-identity → drop entirely
-        if np.allclose(mat, identity_2x2, atol=1e-6):
+            result.append(gates[i])
             i = j
             continue
 
-        # Classify at numpy level (avoids torch overhead in Gate constructor)
-        if abs(mat[0, 1]) < 1e-8 and abs(mat[1, 0]) < 1e-8:
-            result.append(Gate(None, target, diagonal=torch.tensor(
-                [mat[0, 0], mat[1, 1]], dtype=torch.complex64,
-            )))
-        else:
-            g = object.__new__(Gate)
-            g._tensor = torch.tensor(mat, dtype=torch.complex64)
-            g._diagonal = None
-            g._permutation = None
-            g._permutation_factors = None
-            g.targets = [target]
-            result.append(g)
+        # Group by target qubit, preserving per-qubit order
+        qubit_chains: dict[int, list[int]] = {}
+        for k in range(i, j):
+            t = gates[k].targets[0]
+            if t not in qubit_chains:
+                qubit_chains[t] = []
+            qubit_chains[t].append(k)
+
+        # Check if any qubit has multiple gates
+        has_multi = any(len(v) > 1 for v in qubit_chains.values())
+        if not has_multi:
+            for k in range(i, j):
+                result.append(gates[k])
+            i = j
+            continue
+
+        # Fuse each qubit's chain
+        for target, indices in qubit_chains.items():
+            if len(indices) == 1:
+                result.append(gates[indices[0]])
+                continue
+
+            mat = _gate_to_np_matrix(gates[indices[0]], 2)
+            for idx in indices[1:]:
+                mat = _gate_to_np_matrix(gates[idx], 2) @ mat
+
+            # Near-identity -> drop entirely
+            if np.allclose(mat, identity_2x2, atol=1e-6):
+                continue
+
+            # Classify at numpy level (avoids torch overhead in Gate constructor)
+            if abs(mat[0, 1]) < 1e-8 and abs(mat[1, 0]) < 1e-8:
+                result.append(Gate(None, target, diagonal=torch.tensor(
+                    [mat[0, 0], mat[1, 1]], dtype=torch.complex64,
+                )))
+            else:
+                g = object.__new__(Gate)
+                g._tensor = torch.tensor(mat, dtype=torch.complex64)
+                g._diagonal = None
+                g._permutation = None
+                g._permutation_factors = None
+                g.targets = [target]
+                result.append(g)
+
         i = j
 
     return tuple(result)
+
+
+def _cancel_adjacent_inverse_pairs(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
+    """Cancel adjacent gate pairs that multiply to identity using a stack.
+
+    Handles cascading cancellations: if cancelling a pair exposes another
+    cancellable pair, it is also cancelled in the same pass.  Works for
+    1-qubit and 2-qubit gates (via matrix multiply) and for full-state
+    diagonal gates of any size (via element-wise diagonal product).
+    """
+    n = len(gates)
+    if n < 2:
+        return gates
+
+    # Quick check: any adjacent pair with same targets?
+    has_candidate = False
+    for i in range(n - 1):
+        if gates[i].targets == gates[i + 1].targets:
+            has_candidate = True
+            break
+    if not has_candidate:
+        return gates
+
+    stack: list[Gate] = []
+    for gate in gates:
+        if stack:
+            top = stack[-1]
+            if top.targets == gate.targets:
+                is_inverse = False
+                # Fast path: both diagonal (any size) — element-wise check
+                if top.diagonal is not None and gate.diagonal is not None:
+                    d_top = top.diagonal.numpy().astype(np.complex64)
+                    d_cur = gate.diagonal.numpy().astype(np.complex64)
+                    is_inverse = bool(np.allclose(d_cur * d_top, 1.0, atol=1e-6))
+                elif len(gate.targets) <= 2:
+                    dim = 1 << len(gate.targets)
+                    product = _gate_to_np_matrix(gate, dim) @ _gate_to_np_matrix(top, dim)
+                    is_inverse = bool(np.allclose(product, np.eye(dim, dtype=np.complex64), atol=1e-6))
+                if is_inverse:
+                    stack.pop()
+                    continue
+        stack.append(gate)
+
+    if len(stack) == n:
+        return gates
+    return tuple(stack)
 
 
 def _fuse_segment_permutations(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
@@ -859,15 +930,21 @@ def _run_compiled_simulation(
         if n_qubits <= cpu_threshold:
             device = torch.device("cpu")
 
-    # Preprocess: fuse consecutive diagonal and permutation gate runs
+    # Preprocess: cancel inverse pairs, then fuse consecutive gate runs
     fused_steps = []
     any_changed = False
     for step in compiled.steps:
         if isinstance(step, _DynamicSegmentStep):
-            fused_gates = _fuse_segment_diagonals(step.gates, n_qubits)
+            # Pre-pass: cancel adjacent inverse pairs on raw gates.
+            # For roundtrip circuits (U @ U†), the palindrome structure
+            # collapses via cheap 2x2/4x4 matrix checks, avoiding the
+            # expensive full-state diagonal array construction below.
+            fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
+            fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
             fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
             if n_qubits >= 17:
                 fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
+                fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
             if fused_gates is not step.gates:
                 fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
                 any_changed = True
