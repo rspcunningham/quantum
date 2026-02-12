@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Callable
@@ -153,6 +154,30 @@ def _compile_execution_graph(circuit: Circuit) -> _DynamicCompiledGraph:
         node_count=node_count,
         terminal_measurements=tuple(terminal_measurements),
     )
+
+
+def _should_run_heavy_compile_fusions(
+    compiled: _DynamicCompiledGraph,
+    *,
+    n_qubits: int,
+) -> bool:
+    """Decide whether expensive numpy-based fusion passes should run."""
+    if os.environ.get("QUANTUM_FORCE_HEAVY_FUSION") == "1":
+        return True
+    if os.environ.get("QUANTUM_DISABLE_HEAVY_FUSION") == "1":
+        return False
+
+    # Static circuits with multiple terminal measurements cache a CDF after the
+    # first evolution; dynamic circuits cache an exact output distribution. In
+    # both cases, heavy compile-time fusions are typically not amortized.
+    if compiled.node_count == 0 and len(compiled.terminal_measurements) > 1:
+        return False
+    if compiled.node_count > 0:
+        return False
+
+    # For circuits that cannot use distribution caching, keep heavy fusion only
+    # while state dimension is still moderate.
+    return n_qubits <= 16
 
 
 def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
@@ -1276,7 +1301,9 @@ def _run_compiled_simulation(
             if n_qubits <= cpu_threshold:
                 device = torch.device("cpu")
 
-        # Preprocess: cancel inverse pairs, then fuse consecutive gate runs
+        # Preprocess: always run inverse cancellation; gate-fusion passes are
+        # enabled only when their compile-time cost is likely to be amortized.
+        run_heavy_fusion = _should_run_heavy_compile_fusions(compiled, n_qubits=n_qubits)
         fused_steps = []
         any_changed = False
         for step in compiled.steps:
@@ -1286,11 +1313,12 @@ def _run_compiled_simulation(
                 # collapses via cheap 2x2/4x4 matrix checks, avoiding the
                 # expensive full-state diagonal array construction below.
                 fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
-                fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
-                fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
-                if n_qubits >= 17:
-                    fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
-                    fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
+                if run_heavy_fusion:
+                    fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
+                    fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
+                    if n_qubits >= 17:
+                        fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
+                        fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
                 if fused_gates is not step.gates:
                     fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
                     any_changed = True
