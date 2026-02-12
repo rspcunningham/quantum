@@ -1178,7 +1178,8 @@ class _CompiledCircuitCache:
     segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]]
     input_device_type: str  # original device.type before CPU override
     effective_device: torch.device  # actual device used (after CPU override)
-    cached_sampling_cdf: torch.Tensor | None = None  # cumulative probs for searchsorted
+    cached_sampling_cdf: torch.Tensor | None = None  # dense cumulative probs for searchsorted
+    cached_sparse_static_cdf: tuple[torch.Tensor, torch.Tensor] | None = None  # (codes, cdf) sparse static
     cached_dynamic_dist: tuple[torch.Tensor, torch.Tensor] | None = None  # (codes, cdf) for dynamic circuits
 
 
@@ -1209,7 +1210,16 @@ def _run_compiled_simulation(
         segment_scalar_caches = cached.segment_scalar_caches
         device = cached.effective_device
 
-        # Fast path: cached CDF for static circuits — skip evolution entirely.
+        # Fast path: cached sparse CDF for static circuits with few outcomes.
+        # Searchsorted on K entries (K << 2^n) instead of 2^n.
+        if (cached.cached_sparse_static_cdf is not None
+                and compiled.node_count == 0):
+            codes, sparse_cdf = cached.cached_sparse_static_cdf
+            return _sample_from_dynamic_dist(
+                codes=codes, cdf=sparse_cdf, num_shots=num_shots, n_bits=n_bits,
+            )
+
+        # Fast path: cached dense CDF for static circuits — skip evolution entirely.
         # The evolved state is deterministic for static circuits, so the CDF
         # computed on the first call can be reused for subsequent shot counts.
         if (cached.cached_sampling_cdf is not None
@@ -1422,6 +1432,8 @@ def _run_compiled_simulation(
     # For static circuits with multiple terminal measurements, compute CDF
     # from the final state and cache it. Uses searchsorted (faster than
     # multinomial) and enables skipping evolution entirely on subsequent calls.
+    # When the output distribution is sparse (K << 2^n), store only K entries
+    # so searchsorted operates on K elements instead of 2^n.
     if (compiled.node_count == 0
             and len(compiled.terminal_measurements) > 1
             and len(branches) == 1):
@@ -1432,17 +1444,58 @@ def _run_compiled_simulation(
             probs = probs / probs.sum().clamp_min(1e-12)
             if probs.device.type == "mps":
                 probs = probs.to("cpu")
-            cdf = torch.cumsum(probs, dim=0)
-            cached_entry = _circuit_compilation_cache.get(cache_key)
-            if cached_entry is not None:
-                cached_entry.cached_sampling_cdf = cdf
-            return _sample_from_cdf(
-                cdf=cdf,
-                terminal_measurements=compiled.terminal_measurements,
-                num_shots=num_shots,
-                n_qubits=n_qubits,
-                n_bits=n_bits,
-            )
+
+            # Detect sparsity: count nonzero outcomes.
+            nz_mask = probs > 1e-15
+            n_nonzero = nz_mask.sum().item()
+            dim = probs.shape[0]
+
+            if n_nonzero < dim // 4 and n_nonzero < 65536:
+                # Sparse path: store only nonzero-probability register codes.
+                nz_indices = nz_mask.nonzero(as_tuple=False).flatten().to(dtype=torch.int64)
+                nz_probs = probs[nz_indices]
+
+                # Convert basis state indices to register codes.
+                tmeas = compiled.terminal_measurements
+                if (n_bits == n_qubits
+                        and len(tmeas) == n_qubits
+                        and all(m.qubit == m.bit for m in tmeas)):
+                    reg_codes = nz_indices
+                else:
+                    reg_codes = torch.zeros(n_nonzero, dtype=torch.int64, device=nz_indices.device)
+                    for m in tmeas:
+                        qubit_shift = n_qubits - 1 - m.qubit
+                        bit_shift = n_bits - 1 - m.bit
+                        measured_bit = (nz_indices >> qubit_shift) & 1
+                        reg_codes |= measured_bit << bit_shift
+                    # Aggregate probabilities for same register codes.
+                    unique_codes, inverse = torch.unique(reg_codes, return_inverse=True, sorted=True)
+                    agg_probs = torch.zeros(unique_codes.shape[0], dtype=nz_probs.dtype, device=nz_probs.device)
+                    agg_probs.scatter_add_(0, inverse, nz_probs)
+                    reg_codes = unique_codes
+                    nz_probs = agg_probs
+
+                sparse_cdf = torch.cumsum(nz_probs, dim=0)
+                sparse_cdf[-1] = 1.0
+                cached_entry = _circuit_compilation_cache.get(cache_key)
+                if cached_entry is not None:
+                    cached_entry.cached_sparse_static_cdf = (reg_codes, sparse_cdf)
+                return _sample_from_dynamic_dist(
+                    codes=reg_codes, cdf=sparse_cdf, num_shots=num_shots, n_bits=n_bits,
+                )
+            else:
+                # Dense path: original behavior.
+                cdf = torch.cumsum(probs, dim=0)
+                cached_entry = _circuit_compilation_cache.get(cache_key)
+                if cached_entry is not None:
+                    cached_entry.cached_sampling_cdf = cdf
+                return _sample_from_cdf(
+                    cdf=cdf,
+                    terminal_measurements=compiled.terminal_measurements,
+                    num_shots=num_shots,
+                    n_qubits=n_qubits,
+                    n_bits=n_bits,
+                )
 
     result = _sample_terminal_measurements_from_branches(
         branches=branches,
