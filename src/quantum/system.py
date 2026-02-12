@@ -799,6 +799,20 @@ def _sample_from_cdf(
     return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
 
 
+def _sample_from_dynamic_dist(
+    *,
+    codes: torch.Tensor,
+    cdf: torch.Tensor,
+    num_shots: int,
+    n_bits: int,
+) -> dict[str, int]:
+    """Sample from a cached sparse probability distribution over register codes."""
+    randoms = torch.rand(num_shots, device=cdf.device)
+    indices = torch.searchsorted(cdf, randoms).clamp(max=cdf.shape[0] - 1)
+    register_codes = codes[indices]
+    return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
+
+
 def _state_merge_signature(
     state_vector: torch.Tensor,
     *,
@@ -907,6 +921,7 @@ def _advance_branches_with_measurement(
     sig_vector_b: torch.Tensor,
     signature_scale: int,
     signature_weights: torch.Tensor,
+    exact: bool = False,
 ) -> dict[tuple[int, int], int]:
     """Advance branches through one non-terminal measurement step."""
     mask_entry = measurement_masks.get(measurement.qubit)
@@ -935,8 +950,12 @@ def _advance_branches_with_measurement(
             p1 = float(p1_tensor.item())
             state_prob_cache[state_id] = p1
 
-        shots_1 = _sample_binomial_count(shots=shots, p1=p1)
-        shots_0 = shots - shots_1
+        if exact:
+            shots_1 = shots * p1
+            shots_0 = shots * (1.0 - p1)
+        else:
+            shots_1 = _sample_binomial_count(shots=shots, p1=p1)
+            shots_0 = shots - shots_1
 
         if shots_0 > 0:
             outcome_key = (state_id, 0)
@@ -1010,6 +1029,143 @@ def _compact_state_arena(
         del state_arena[state_id]
 
 
+def _compute_dynamic_output_cdf(
+    *,
+    compiled: _DynamicCompiledGraph,
+    n_qubits: int,
+    n_bits: int,
+    device: torch.device,
+    initial_state_np: np.ndarray | None,
+    segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]],
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Compute exact output distribution for a dynamic circuit.
+
+    Runs a probability-weighted branch engine (exact Born splits instead of
+    binomial sampling) to obtain the true output distribution, then returns
+    (codes, cdf) suitable for searchsorted sampling on subsequent calls.
+    """
+    if n_bits == 0:
+        return None
+
+    gate_system = BatchedQuantumSystem(
+        n_qubits=n_qubits, n_bits=n_bits, batch_size=1, device=device,
+    )
+    if initial_state_np is not None:
+        gate_system.state_vectors = torch.from_numpy(
+            initial_state_np.reshape(1, -1)
+        ).to(device)
+
+    state_arena: dict[int, torch.Tensor] = {0: gate_system.state_vectors}
+    next_state_id = 1
+
+    def _add_state(sv: torch.Tensor) -> int:
+        nonlocal next_state_id
+        sid = next_state_id
+        state_arena[sid] = sv
+        next_state_id += 1
+        return sid
+
+    # Probability-weighted branches (float weights instead of int shots)
+    branches: dict[tuple[int, int], float] = {(0, 0): 1.0}
+
+    measurement_masks: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+    # Signature infrastructure for state merging (controls branch explosion)
+    dim = 1 << n_qubits
+    indices = torch.arange(dim, device=device, dtype=torch.float32)
+    phase_a = 0.731 * indices + 0.119 * (indices * indices)
+    phase_b = 1.213 * indices + 0.071 * (indices * indices)
+    sig_vector_a = (torch.cos(phase_a) + 1j * torch.sin(phase_a)).to(torch.complex64)
+    sig_vector_b = (torch.cos(phase_b) + 1j * torch.sin(phase_b)).to(torch.complex64)
+    signature_weights = torch.tensor(
+        [1_000_003, 1_000_033, 1_000_037, 1_000_039,
+         1_000_081, 1_000_099, 1_000_117, 1_000_121],
+        dtype=torch.int64, device=device,
+    )
+
+    for step_idx, step in enumerate(compiled.steps):
+        if isinstance(step, (_DynamicSegmentStep, _DynamicConditionalStep)):
+            condition = step.condition if isinstance(step, _DynamicConditionalStep) else None
+            branches = _advance_branches_with_gate_sequence(
+                branches=branches,
+                state_arena=state_arena,
+                gate_system=gate_system,
+                gates=step.gates,
+                add_state=_add_state,
+                condition=condition,
+                scalar_cache=segment_scalar_caches.get(step_idx),
+            )
+        else:
+            branches = _advance_branches_with_measurement(
+                branches=branches,
+                state_arena=state_arena,
+                gate_system=gate_system,
+                measurement=step.measurement,
+                n_bits=n_bits,
+                measurement_masks=measurement_masks,
+                add_state=_add_state,
+                sig_vector_a=sig_vector_a,
+                sig_vector_b=sig_vector_b,
+                signature_scale=1_000_000,
+                signature_weights=signature_weights,
+                exact=True,
+            )
+        _compact_state_arena(state_arena, branches)
+
+    # Compute exact output distribution from final branches
+    terminal_measurements = compiled.terminal_measurements
+    dist: dict[int, float] = {}
+
+    if not terminal_measurements:
+        # No terminal measurements — output determined by classical register
+        for (_, classical_value), weight in branches.items():
+            if weight > 1e-15:
+                dist[classical_value] = dist.get(classical_value, 0.0) + weight
+    else:
+        is_identity_measure = (
+            n_bits == n_qubits
+            and len(terminal_measurements) == n_qubits
+            and all(m.qubit == m.bit for m in terminal_measurements)
+        )
+
+        basis_indices = np.arange(dim, dtype=np.int64)
+
+        for (state_id, classical_value), weight in branches.items():
+            if weight <= 1e-15:
+                continue
+            state = state_arena[state_id][0]
+            if state.device.type != "cpu":
+                state = state.cpu()
+            state_probs = np.abs(state.numpy()) ** 2
+            weighted = state_probs * weight
+            nonzero = np.nonzero(weighted > 1e-18)[0]
+
+            if is_identity_measure:
+                for i in nonzero:
+                    dist[int(i)] = dist.get(int(i), 0.0) + float(weighted[i])
+            else:
+                register_codes = np.full(dim, classical_value, dtype=np.int64)
+                for m in terminal_measurements:
+                    qubit_shift = n_qubits - 1 - m.qubit
+                    bit_shift = n_bits - 1 - m.bit
+                    measured_bit = (basis_indices >> qubit_shift) & 1
+                    bit_mask = 1 << bit_shift
+                    register_codes = (register_codes & ~bit_mask) | (measured_bit << bit_shift)
+                for i in nonzero:
+                    code = int(register_codes[i])
+                    dist[code] = dist.get(code, 0.0) + float(weighted[i])
+
+    if not dist:
+        return None
+
+    sorted_items = sorted(dist.items())
+    codes = torch.tensor([c for c, _ in sorted_items], dtype=torch.int64)
+    probs = torch.tensor([p for _, p in sorted_items], dtype=torch.float64)
+    probs = probs / probs.sum()
+    cdf = torch.cumsum(probs.float(), dim=0)
+    return codes, cdf
+
+
 @dataclass(slots=True)
 class _CompiledCircuitCache:
     """Cached compilation result for a circuit."""
@@ -1020,6 +1176,7 @@ class _CompiledCircuitCache:
     input_device_type: str  # original device.type before CPU override
     effective_device: torch.device  # actual device used (after CPU override)
     cached_sampling_cdf: torch.Tensor | None = None  # cumulative probs for searchsorted
+    cached_dynamic_dist: tuple[torch.Tensor, torch.Tensor] | None = None  # (codes, cdf) for dynamic circuits
 
 
 _circuit_compilation_cache: dict[int, _CompiledCircuitCache] = {}
@@ -1061,6 +1218,15 @@ def _run_compiled_simulation(
                 num_shots=num_shots,
                 n_qubits=n_qubits,
                 n_bits=n_bits,
+            )
+
+        # Fast path: cached exact distribution for dynamic circuits.
+        # Probability-weighted branching computes the true output distribution
+        # on the first call; subsequent calls sample via searchsorted.
+        if cached.cached_dynamic_dist is not None and compiled.node_count > 0:
+            codes, cdf = cached.cached_dynamic_dist
+            return _sample_from_dynamic_dist(
+                codes=codes, cdf=cdf, num_shots=num_shots, n_bits=n_bits,
             )
     else:
         input_device_type = device.type
@@ -1275,7 +1441,7 @@ def _run_compiled_simulation(
                 n_bits=n_bits,
             )
 
-    return _sample_terminal_measurements_from_branches(
+    result = _sample_terminal_measurements_from_branches(
         branches=branches,
         state_arena=state_arena,
         terminal_measurements=compiled.terminal_measurements,
@@ -1283,6 +1449,26 @@ def _run_compiled_simulation(
         n_qubits=n_qubits,
         n_bits=n_bits,
     )
+
+    # For dynamic circuits, compute exact probability distribution and cache it.
+    # The probability-weighted branch engine traces all measurement paths with
+    # exact Born splits, giving the true output distribution. Subsequent calls
+    # skip the branch engine entirely and sample via searchsorted.
+    if compiled.node_count > 0:
+        cached_entry = _circuit_compilation_cache.get(cache_key)
+        if cached_entry is not None and cached_entry.cached_dynamic_dist is None:
+            dynamic_dist = _compute_dynamic_output_cdf(
+                compiled=compiled,
+                n_qubits=n_qubits,
+                n_bits=n_bits,
+                device=device,
+                initial_state_np=initial_state_np,
+                segment_scalar_caches=segment_scalar_caches,
+            )
+            if dynamic_dist is not None:
+                cached_entry.cached_dynamic_dist = dynamic_dist
+
+    return result
 
 
 def measure_all(qubits: QuantumRegister | list[int] | int) -> Circuit:
