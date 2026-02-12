@@ -6,6 +6,8 @@ A state-vector quantum circuit simulator built from scratch with PyTorch, target
 
 156 test circuits spanning 2-24 qubits, 10 circuit families, static and dynamic workloads. Benchmarked against Qiskit Aer (IBM's C++ simulator) across 5 shot counts. Per-cell color is `log2(aer_time / native_time)` — green means this simulator is faster.
 
+At high shot counts (10K), native is **1.66x faster** than Aer (87/150 cases). At low shot counts (1-100), Aer's compiled C++ dispatch wins — native is 0.49-0.56x. Overall geometric mean across all 750 cells: **0.71x** (150 common cases, 5 shot counts).
+
 ## Why this exists
 
 1. **There isn't a good MPS-native quantum simulator.** Qiskit and Cirq target CUDA. This project builds a performant simulator that runs well on Apple GPUs via PyTorch's MPS backend.
