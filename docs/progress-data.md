@@ -19,6 +19,7 @@ All benchmark cases (24 hand-coded + 132 QASM-loaded). Cases that OOM are exclud
 | idx | checkpoint_jsonl | git_hash | label_x | total_1_s | total_10_s | total_100_s | total_1000_s | total_10000_s | cases_complete |
 |---:|---|---|---|---:|---:|---:|---:|---:|---:|
 | 0 | `2026-02-11T172533.jsonl` | `654bc2c` | `654bc2c\n02-11T1725` | 71.1667 | 68.3367 | 68.7975 | 67.8941 | 68.4366 | 146 |
+| 1 | `2026-02-12T070101.jsonl` | `6331041` | `6331041\n02-12T0701` | 7.2060 | 4.0211 | 4.3185 | 4.5478 | 4.5890 | 156 |
 
 ## SOTA Reference — Qiskit Aer (Full Suite)
 

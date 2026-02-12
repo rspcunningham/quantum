@@ -6,7 +6,7 @@ A state-vector quantum circuit simulator built from scratch with PyTorch, target
 
 156 test circuits spanning 2-24 qubits, 10 circuit families, static and dynamic workloads. Benchmarked against Qiskit Aer (IBM's C++ simulator) across 5 shot counts. Per-cell color is `log2(aer_time / native_time)` — green means this simulator is faster.
 
-At high shot counts (10K), native is **1.86x faster** than Aer (98/156 cases). At low shot counts (1-100), Aer's compiled C++ dispatch wins — native is 0.54-0.65x. Overall geometric mean across all 780 cells: **0.81x** (156 common cases, 5 shot counts).
+Overall geometric mean across all 780 cells: **1.91x faster** than Aer (156 cases, 5 shot counts). At high shot counts (10K), native is **4.52x faster** (136/156 cases). Even at low shot counts (1-10), native now matches or beats Aer (1.13-1.48x). Compile-time inverse-pair cancellation collapses all 50 roundtrip circuits to identity in O(n) time.
 
 ## Why this exists
 
