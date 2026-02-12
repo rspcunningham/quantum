@@ -408,11 +408,9 @@ def _precompute_initial_1q_block(
 def _fuse_segment_permutations(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
     """Replace consecutive permutation gate runs with a single pre-fused permutation.
 
-    Uses numpy for CPU computation. Only applied when n_qubits <= 13 where
-    numpy compile cost is less than MPS per-gate gather cost.
+    Uses numpy for CPU computation. Compile cost scales as O(gates × 2^n) but
+    is amortized across calls by the compilation cache.
     """
-    if n_qubits > 12:
-        return gates
 
     n = len(gates)
     i = 0
