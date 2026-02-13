@@ -292,12 +292,105 @@ kernel void permute_subset_with_phase(
 """
 
 
+_MPS_DENSE_SHADER_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+inline float2 _cmul(float2 a, float2 b) {
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+kernel void dense_single_qubit(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int& target,
+    device const float2* coeffs,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+
+    uint bitpos = uint(n_qubits - 1 - target);
+    uint mask = 1u << bitpos;
+    uint idx0 = idx & ~mask;
+    uint idx1 = idx0 | mask;
+
+    float2 v0 = in_state[batch * uint(dim) + idx0];
+    float2 v1 = in_state[batch * uint(dim) + idx1];
+    uint row = (idx >> bitpos) & 1u;
+
+    float2 c0 = coeffs[row * 2u + 0u];
+    float2 c1 = coeffs[row * 2u + 1u];
+    out_state[gid] = _cmul(c0, v0) + _cmul(c1, v1);
+}
+
+kernel void dense_two_qubit(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int& target0,
+    constant int& target1,
+    device const float2* coeffs,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+
+    uint bitpos0 = uint(n_qubits - 1 - target0);
+    uint bitpos1 = uint(n_qubits - 1 - target1);
+    uint mask0 = 1u << bitpos0;
+    uint mask1 = 1u << bitpos1;
+
+    uint idx00 = idx & ~mask0 & ~mask1;
+    uint idx01 = idx00 | mask1;
+    uint idx10 = idx00 | mask0;
+    uint idx11 = idx00 | mask0 | mask1;
+
+    float2 v00 = in_state[batch * uint(dim) + idx00];
+    float2 v01 = in_state[batch * uint(dim) + idx01];
+    float2 v10 = in_state[batch * uint(dim) + idx10];
+    float2 v11 = in_state[batch * uint(dim) + idx11];
+
+    uint b0 = (idx >> bitpos0) & 1u;
+    uint b1 = (idx >> bitpos1) & 1u;
+    uint row = (b0 << 1u) | b1;
+
+    float2 c0 = coeffs[row * 4u + 0u];
+    float2 c1 = coeffs[row * 4u + 1u];
+    float2 c2 = coeffs[row * 4u + 2u];
+    float2 c3 = coeffs[row * 4u + 3u];
+    out_state[gid] = _cmul(c0, v00) + _cmul(c1, v01) + _cmul(c2, v10) + _cmul(c3, v11);
+}
+"""
+
+
 @lru_cache(maxsize=1)
 def _mps_monomial_kernel_library() -> object | None:
     """Compile and cache custom MPS kernels for subset monomial gates."""
     if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
         return None
     return torch.mps.compile_shader(_MPS_MONOMIAL_SHADER_SOURCE)
+
+
+@lru_cache(maxsize=1)
+def _mps_dense_kernel_library() -> object | None:
+    """Compile and cache custom MPS kernels for dense 1q/2q gate application."""
+    if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
+        return None
+    return torch.mps.compile_shader(_MPS_DENSE_SHADER_SOURCE)
 
 
 def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
@@ -762,7 +855,8 @@ def _compile_segment_scalars(
                 g01 = complex(g[0, 1])
                 g10 = complex(g[1, 0])
                 g11 = complex(g[1, 1])
-                scalars.extend([g00, g10])
+                # Row-major 2x2 for dense MPS kernel path.
+                scalars.extend([g00, g01, g10, g11])
                 alpha_lists.append((g01, g11))
             elif k == 2:
                 offset = len(scalars)
@@ -774,8 +868,10 @@ def _compile_segment_scalars(
                     r = [[complex(g[perm[i], perm[j]]) for j in range(4)] for i in range(4)]
                 else:
                     r = [[complex(g[i, j]) for j in range(4)] for i in range(4)]
+                # Row-major 4x4 for dense MPS kernel path.
                 for i in range(4):
-                    scalars.append(r[i][0])
+                    for j in range(4):
+                        scalars.append(r[i][j])
                 alphas = tuple(r[i][j] for i in range(4) for j in range(1, 4))
                 alpha_lists.append(alphas)
             else:
@@ -1776,6 +1872,7 @@ class BatchedQuantumSystem:
     _measurement_masks: dict[int, torch.Tensor]
     _measurement_weights: dict[int, torch.Tensor]
     _gate_tensors: dict[int, torch.Tensor]
+    _dense_gate_coeffs: dict[tuple[int, int], torch.Tensor]
     _gate_diagonals: dict[int, torch.Tensor]
     _gate_permutations: dict[int, torch.Tensor]
     _gate_permutations_i32: dict[int, torch.Tensor]
@@ -1785,6 +1882,8 @@ class BatchedQuantumSystem:
     _permutation_source_indices: dict[tuple[tuple[int, ...], int], torch.Tensor]
     _permutation_phase_factors: dict[tuple[tuple[int, ...], int], torch.Tensor]
     _mps_monomial_kernels: object | None
+    _mps_dense_kernels: object | None
+    _use_mps_dense_kernels: bool
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
@@ -1795,6 +1894,7 @@ class BatchedQuantumSystem:
         self._measurement_masks = {}
         self._measurement_weights = {}
         self._gate_tensors = {}
+        self._dense_gate_coeffs = {}
         self._gate_diagonals = {}
         self._gate_permutations = {}
         self._gate_permutations_i32 = {}
@@ -1811,6 +1911,14 @@ class BatchedQuantumSystem:
         self._alt_state: torch.Tensor | None = None
         self._use_double_buffer = device.type != "cpu"
         self._mps_monomial_kernels = _mps_monomial_kernel_library() if device.type == "mps" else None
+        self._mps_dense_kernels = _mps_dense_kernel_library() if device.type == "mps" else None
+        disable_dense = os.environ.get("QUANTUM_DISABLE_MPS_DENSE_KERNELS") == "1"
+        force_dense = os.environ.get("QUANTUM_FORCE_MPS_DENSE_KERNELS") == "1"
+        self._use_mps_dense_kernels = (
+            self._mps_dense_kernels is not None
+            and not disable_dense
+            and (force_dense or n_qubits >= 24)
+        )
 
     def _ensure_alt_state(self) -> torch.Tensor:
         """Return a pre-allocated alternate state buffer for double-buffer swaps."""
@@ -1846,6 +1954,23 @@ class BatchedQuantumSystem:
 
     def _apply_dense_single_qubit_gate(self, gate: Gate, target: int) -> "BatchedQuantumSystem":
         """Apply a dense single-qubit gate."""
+        if self._use_mps_dense_kernels:
+            dim = 1 << self.n_qubits
+            coeffs = self._device_dense_gate_coeffs(gate.tensor, n_target_qubits=1)
+            out_state = self._ensure_alt_state()
+            assert self._mps_dense_kernels is not None
+            self._mps_dense_kernels.dense_single_qubit(
+                self.state_vectors.reshape(-1),
+                out_state.reshape(-1),
+                self.n_qubits,
+                dim,
+                self.batch_size,
+                target,
+                coeffs.reshape(-1),
+            )
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+            return self
+
         g = gate.tensor.reshape(2, 2)
         g00, g01, g10, g11 = complex(g[0, 0]), complex(g[0, 1]), complex(g[1, 0]), complex(g[1, 1])
 
@@ -1873,6 +1998,24 @@ class BatchedQuantumSystem:
 
     def _apply_dense_two_qubit_gate(self, gate: Gate, targets: tuple[int, int]) -> "BatchedQuantumSystem":
         """Apply a dense two-qubit gate."""
+        if self._use_mps_dense_kernels:
+            dim = 1 << self.n_qubits
+            coeffs = self._device_dense_gate_coeffs(gate.tensor, n_target_qubits=2)
+            out_state = self._ensure_alt_state()
+            assert self._mps_dense_kernels is not None
+            self._mps_dense_kernels.dense_two_qubit(
+                self.state_vectors.reshape(-1),
+                out_state.reshape(-1),
+                self.n_qubits,
+                dim,
+                self.batch_size,
+                targets[0],
+                targets[1],
+                coeffs.reshape(-1),
+            )
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+            return self
+
         t0, t1 = targets
         g = gate.tensor.reshape(4, 4)
 
@@ -2090,6 +2233,39 @@ class BatchedQuantumSystem:
 
         targets = tuple(gate.targets)
         k = len(targets)
+        if self._use_mps_dense_kernels:
+            if k == 1:
+                dim = 1 << self.n_qubits
+                out_state = self._ensure_alt_state()
+                assert self._mps_dense_kernels is not None
+                self._mps_dense_kernels.dense_single_qubit(
+                    self.state_vectors.reshape(-1),
+                    out_state.reshape(-1),
+                    self.n_qubits,
+                    dim,
+                    self.batch_size,
+                    targets[0],
+                    buf.narrow(0, offset, 4),
+                )
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+                return
+            if k == 2:
+                dim = 1 << self.n_qubits
+                out_state = self._ensure_alt_state()
+                assert self._mps_dense_kernels is not None
+                self._mps_dense_kernels.dense_two_qubit(
+                    self.state_vectors.reshape(-1),
+                    out_state.reshape(-1),
+                    self.n_qubits,
+                    dim,
+                    self.batch_size,
+                    targets[0],
+                    targets[1],
+                    buf.narrow(0, offset, 16),
+                )
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+                return
+
         if k == 1:
             target = targets[0]
             a = 1 << target
@@ -2101,13 +2277,13 @@ class BatchedQuantumSystem:
                 alt = self._ensure_alt_state().view(self.batch_size, a, 2, b)
                 torch.mul(s0, buf[offset], out=alt[:, :, 0, :])
                 alt[:, :, 0, :].add_(s1, alpha=alphas[0])
-                torch.mul(s0, buf[offset + 1], out=alt[:, :, 1, :])
+                torch.mul(s0, buf[offset + 2], out=alt[:, :, 1, :])
                 alt[:, :, 1, :].add_(s1, alpha=alphas[1])
                 self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
             else:
                 new_s0 = torch.mul(s0, buf[offset])
                 new_s0.add_(s1, alpha=alphas[0])
-                new_s1 = torch.mul(s0, buf[offset + 1])
+                new_s1 = torch.mul(s0, buf[offset + 2])
                 new_s1.add_(s1, alpha=alphas[1])
                 self.state_vectors = torch.stack([new_s0, new_s1], dim=2).reshape(self.batch_size, -1)
             return
@@ -2127,21 +2303,21 @@ class BatchedQuantumSystem:
                 alt = self._ensure_alt_state().view(self.batch_size, a, 2, b, 2, c)
                 torch.mul(s00, buf[offset], out=alt[:, :, 0, :, 0, :])
                 alt[:, :, 0, :, 0, :].add_(s01, alpha=alphas[0]).add_(s10, alpha=alphas[1]).add_(s11, alpha=alphas[2])
-                torch.mul(s00, buf[offset + 1], out=alt[:, :, 0, :, 1, :])
+                torch.mul(s00, buf[offset + 4], out=alt[:, :, 0, :, 1, :])
                 alt[:, :, 0, :, 1, :].add_(s01, alpha=alphas[3]).add_(s10, alpha=alphas[4]).add_(s11, alpha=alphas[5])
-                torch.mul(s00, buf[offset + 2], out=alt[:, :, 1, :, 0, :])
+                torch.mul(s00, buf[offset + 8], out=alt[:, :, 1, :, 0, :])
                 alt[:, :, 1, :, 0, :].add_(s01, alpha=alphas[6]).add_(s10, alpha=alphas[7]).add_(s11, alpha=alphas[8])
-                torch.mul(s00, buf[offset + 3], out=alt[:, :, 1, :, 1, :])
+                torch.mul(s00, buf[offset + 12], out=alt[:, :, 1, :, 1, :])
                 alt[:, :, 1, :, 1, :].add_(s01, alpha=alphas[9]).add_(s10, alpha=alphas[10]).add_(s11, alpha=alphas[11])
                 self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
             else:
                 new_s00 = torch.mul(s00, buf[offset])
                 new_s00.add_(s01, alpha=alphas[0]).add_(s10, alpha=alphas[1]).add_(s11, alpha=alphas[2])
-                new_s01 = torch.mul(s00, buf[offset + 1])
+                new_s01 = torch.mul(s00, buf[offset + 4])
                 new_s01.add_(s01, alpha=alphas[3]).add_(s10, alpha=alphas[4]).add_(s11, alpha=alphas[5])
-                new_s10 = torch.mul(s00, buf[offset + 2])
+                new_s10 = torch.mul(s00, buf[offset + 8])
                 new_s10.add_(s01, alpha=alphas[6]).add_(s10, alpha=alphas[7]).add_(s11, alpha=alphas[8])
-                new_s11 = torch.mul(s00, buf[offset + 3])
+                new_s11 = torch.mul(s00, buf[offset + 12])
                 new_s11.add_(s01, alpha=alphas[9]).add_(s10, alpha=alphas[10]).add_(s11, alpha=alphas[11])
                 self.state_vectors = torch.stack([
                     torch.stack([new_s00, new_s01], dim=3),
@@ -2204,6 +2380,18 @@ class BatchedQuantumSystem:
         moved = tensor if tensor.device == self.device else tensor.to(self.device)
         moved = moved.reshape((2,) * n_target_qubits + (2,) * n_target_qubits)
         self._gate_tensors[key] = moved
+        return moved
+
+    def _device_dense_gate_coeffs(self, tensor: torch.Tensor, *, n_target_qubits: int) -> torch.Tensor:
+        key = (id(tensor), n_target_qubits)
+        cached = self._dense_gate_coeffs.get(key)
+        if cached is not None:
+            return cached
+
+        dim = 1 << n_target_qubits
+        moved = tensor if tensor.device == self.device else tensor.to(self.device)
+        moved = moved.reshape(dim, dim).contiguous().reshape(-1)
+        self._dense_gate_coeffs[key] = moved
         return moved
 
     def _device_gate_diagonal(self, diagonal: torch.Tensor) -> torch.Tensor:
