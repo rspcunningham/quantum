@@ -1695,7 +1695,8 @@ def _run_compiled_simulation(
                 fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
                 # Cheap diagonal-run fusion: collapse repeated 1q/2q diagonal
                 # gates (e.g. RZ/CZ layers) by target without 2^n materialization.
-                fused_gates = _fuse_segment_local_diagonals(fused_gates)
+                if n_qubits >= 12:
+                    fused_gates = _fuse_segment_local_diagonals(fused_gates)
                 # Cheap 1q fusion helps primarily on large static states where
                 # per-gate MPS dispatch dominates. Keep it off for smaller
                 # workloads to avoid compile-time overhead/regressions.
