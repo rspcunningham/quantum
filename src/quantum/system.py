@@ -2111,7 +2111,6 @@ def _run_compiled_simulation(
         # diagonal/permutation passes dominate runtime.
         enable_monomial_stream = (
             device.type == "mps"
-            and n_qubits >= 20
             and os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
         )
         if enable_monomial_stream:
@@ -2421,11 +2420,9 @@ class BatchedQuantumSystem:
         self._mps_monomial_kernels = _mps_monomial_kernel_library() if device.type == "mps" else None
         self._mps_dense_kernels = _mps_dense_kernel_library() if device.type == "mps" else None
         disable_dense = os.environ.get("QUANTUM_DISABLE_MPS_DENSE_KERNELS") == "1"
-        force_dense = os.environ.get("QUANTUM_FORCE_MPS_DENSE_KERNELS") == "1"
         self._use_mps_dense_kernels = (
             self._mps_dense_kernels is not None
             and not disable_dense
-            and (force_dense or n_qubits >= 24)
         )
 
     def _ensure_alt_state(self) -> torch.Tensor:
