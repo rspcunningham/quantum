@@ -246,12 +246,22 @@ def _gate_to_np_matrix(gate: Gate, dim: int) -> np.ndarray:
     return gate.tensor.reshape(dim, dim).numpy().astype(np.complex64)
 
 
-def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
-    """Fuse single-qubit gates within contiguous 1q-only regions.
+def _single_qubit_gate_runtime_cost(gate: Gate) -> float:
+    """Relative runtime cost model for 1q gate application."""
+    if gate.permutation is not None:
+        return 0.2
+    if gate.diagonal is not None:
+        return 0.35
+    return 1.0
 
-    Within a region of consecutive 1q gates, all gates on different qubits
-    commute.  Group by target qubit and fuse each qubit's chain into a single
-    gate.  Near-identity results are dropped entirely.
+
+def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
+    """Fuse 1q gates within contiguous 1q-only regions using a cost model.
+
+    This pass is intentionally cheap (no 2^n full-state construction) and
+    general-purpose: it fuses per-qubit chains only when estimated runtime
+    savings are meaningful, avoiding conversions of already-cheap diagonal or
+    permutation chains into dense gates.
     """
     n = len(gates)
     if n < 2:
@@ -275,6 +285,7 @@ def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...
         return gates
 
     identity_2x2 = np.eye(2, dtype=np.complex64)
+    eps = 1e-8
     result: list[Gate] = []
     i = 0
     while i < n:
@@ -309,10 +320,23 @@ def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...
             i = j
             continue
 
-        # Fuse each qubit's chain
+        # Fuse each qubit's chain only when predicted to reduce runtime cost.
         for target, indices in qubit_chains.items():
             if len(indices) == 1:
                 result.append(gates[indices[0]])
+                continue
+
+            before_cost = 0.0
+            dense_count = 0
+            for idx in indices:
+                gate_cost = _single_qubit_gate_runtime_cost(gates[idx])
+                before_cost += gate_cost
+                if gate_cost >= 0.999:
+                    dense_count += 1
+            # Skip low-payoff chains quickly (avoids unnecessary matrix math).
+            if before_cost < 1.6 or dense_count < 2:
+                for idx in indices:
+                    result.append(gates[idx])
                 continue
 
             mat = _gate_to_np_matrix(gates[indices[0]], 2)
@@ -323,11 +347,38 @@ def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...
             if np.allclose(mat, identity_2x2, atol=1e-6):
                 continue
 
-            # Classify at numpy level (avoids torch overhead in Gate constructor)
-            if abs(mat[0, 1]) < 1e-8 and abs(mat[1, 0]) < 1e-8:
+            # Estimate fused-gate runtime cost from matrix structure.
+            offdiag_is_zero = abs(mat[0, 1]) < eps and abs(mat[1, 0]) < eps
+            diag_is_zero = abs(mat[0, 0]) < eps and abs(mat[1, 1]) < eps
+            if offdiag_is_zero:
+                after_cost = 0.35  # diagonal
+            elif diag_is_zero:
+                after_cost = 0.2   # permutation-like (X/phase-X form)
+            else:
+                after_cost = 1.0   # dense
+
+            # Require meaningful predicted gain before replacing the chain.
+            if before_cost < after_cost + 0.5:
+                for idx in indices:
+                    result.append(gates[idx])
+                continue
+
+            # Classify at numpy level (avoids torch overhead in Gate constructor).
+            if offdiag_is_zero:
                 result.append(Gate(None, target, diagonal=torch.tensor(
                     [mat[0, 0], mat[1, 1]], dtype=torch.complex64,
                 )))
+            elif diag_is_zero:
+                perm = torch.tensor([1, 0], dtype=torch.int64)
+                factors = torch.tensor([mat[0, 1], mat[1, 0]], dtype=torch.complex64)
+                g = Gate(None, target, diagonal=torch.ones(2, dtype=torch.complex64))
+                g._diagonal = None
+                g._permutation = perm
+                if bool(torch.allclose(factors, torch.ones_like(factors))):
+                    g._permutation_factors = None
+                else:
+                    g._permutation_factors = factors
+                result.append(g)
             else:
                 g = object.__new__(Gate)
                 g._tensor = torch.tensor(mat, dtype=torch.complex64)
@@ -1313,12 +1364,16 @@ def _run_compiled_simulation(
                 # collapses via cheap 2x2/4x4 matrix checks, avoiding the
                 # expensive full-state diagonal array construction below.
                 fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
+                # Cheap 1q fusion helps primarily on large static states where
+                # per-gate MPS dispatch dominates. Keep it off for smaller
+                # workloads to avoid compile-time overhead/regressions.
+                if compiled.node_count == 0 and n_qubits >= 20:
+                    fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
+                    fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
                 if run_heavy_fusion:
                     fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
                     fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
-                    if n_qubits >= 17:
-                        fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
-                        fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
+                    fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
                 if fused_gates is not step.gates:
                     fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
                     any_changed = True
