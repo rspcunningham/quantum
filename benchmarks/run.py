@@ -1,5 +1,6 @@
 """Benchmark runner for the quantum simulator."""
 
+import atexit
 import argparse
 import gc
 import json
@@ -25,6 +26,9 @@ from quantum.system import _circuit_compilation_cache
 
 SHOT_COUNTS = [1000, 10000]
 OP_KINDS = ("gates", "measurements", "conditional")
+_CASE_WORKER: "_CaseWorker | None" = None
+_CASE_WORKER_CONFIG: tuple[str, bool, str, str] | None = None
+_CASE_WORKER_ATEXIT_REGISTERED = False
 
 
 def get_device() -> torch.device:
@@ -364,44 +368,181 @@ def _build_timeout_row(
     return row
 
 
-def _run_case_worker(
-    case: BenchmarkCase,
+def _run_case_worker_loop(
     *,
+    task_conn: Connection,
+    event_conn: Connection,
     device_type: str,
     verbose: bool,
     git_hash: str,
     backend: str,
-    case_timeout: float | None,
-    conn: Connection,
 ) -> None:
     device = torch.device(device_type)
     aer_adapter: AerAdapter | None = AerAdapter() if backend == "aer" else None
     try:
-        result = _run_case_local(
-            case,
-            device,
-            verbose,
-            git_hash,
-            backend=backend,
-            case_timeout=case_timeout,
-            aer_adapter=aer_adapter,
-            progress_conn=conn,
-        )
-        conn.send({"kind": "result", "result": result})
-    except BaseException as error:
-        try:
-            conn.send({
-                "kind": "error",
-                "error": str(error).strip(),
-                "is_oom": is_oom_error(error),
-            })
-        except Exception:
-            pass
+        while True:
+            try:
+                message = task_conn.recv()
+            except EOFError:
+                break
+            kind = message.get("kind")
+            if kind == "shutdown":
+                break
+            if kind != "run_case":
+                continue
+
+            case: BenchmarkCase = message["case"]
+            case_timeout = message.get("case_timeout")
+            try:
+                result = _run_case_local(
+                    case,
+                    device,
+                    verbose,
+                    git_hash,
+                    backend=backend,
+                    case_timeout=case_timeout,
+                    aer_adapter=aer_adapter,
+                    progress_conn=event_conn,
+                )
+                event_conn.send({"kind": "result", "result": result})
+            except BaseException as error:
+                try:
+                    event_conn.send({
+                        "kind": "error",
+                        "error": str(error).strip(),
+                        "is_oom": is_oom_error(error),
+                    })
+                except Exception:
+                    pass
     finally:
         try:
-            conn.close()
+            task_conn.close()
         except Exception:
             pass
+        try:
+            event_conn.close()
+        except Exception:
+            pass
+
+
+class _CaseWorker:
+    process: mp.Process
+    _task_send_conn: Connection
+    _event_recv_conn: Connection
+
+    def __init__(
+        self,
+        *,
+        device_type: str,
+        verbose: bool,
+        git_hash: str,
+        backend: str,
+    ):
+        ctx = mp.get_context("spawn")
+        task_recv_conn, task_send_conn = ctx.Pipe(duplex=False)
+        event_recv_conn, event_send_conn = ctx.Pipe(duplex=False)
+        process = ctx.Process(
+            target=_run_case_worker_loop,
+            kwargs={
+                "task_conn": task_recv_conn,
+                "event_conn": event_send_conn,
+                "device_type": device_type,
+                "verbose": verbose,
+                "git_hash": git_hash,
+                "backend": backend,
+            },
+        )
+        process.start()
+
+        # Parent keeps task send + event recv ends.
+        task_recv_conn.close()
+        event_send_conn.close()
+
+        self.process = process
+        self._task_send_conn = task_send_conn
+        self._event_recv_conn = event_recv_conn
+
+    def is_alive(self) -> bool:
+        return self.process.is_alive()
+
+    def send_case(self, case: BenchmarkCase, case_timeout: float | None) -> None:
+        self._task_send_conn.send({
+            "kind": "run_case",
+            "case": case,
+            "case_timeout": case_timeout,
+        })
+
+    def poll_event(self, timeout_s: float) -> bool:
+        return self._event_recv_conn.poll(timeout_s)
+
+    def recv_event(self) -> dict:
+        return self._event_recv_conn.recv()
+
+    def drain_events(self) -> list[dict]:
+        events: list[dict] = []
+        while True:
+            try:
+                if not self._event_recv_conn.poll():
+                    break
+                events.append(self._event_recv_conn.recv())
+            except EOFError:
+                break
+        return events
+
+    def close(self) -> None:
+        try:
+            self._task_send_conn.send({"kind": "shutdown"})
+        except Exception:
+            pass
+
+        _terminate_process(self.process)
+
+        try:
+            self._task_send_conn.close()
+        except Exception:
+            pass
+        try:
+            self._event_recv_conn.close()
+        except Exception:
+            pass
+
+
+def _close_case_worker() -> None:
+    global _CASE_WORKER
+    global _CASE_WORKER_CONFIG
+    if _CASE_WORKER is None:
+        return
+    _CASE_WORKER.close()
+    _CASE_WORKER = None
+    _CASE_WORKER_CONFIG = None
+
+
+def _ensure_case_worker(
+    *,
+    device: torch.device,
+    verbose: bool,
+    git_hash: str,
+    backend: str,
+) -> _CaseWorker:
+    global _CASE_WORKER
+    global _CASE_WORKER_CONFIG
+    global _CASE_WORKER_ATEXIT_REGISTERED
+
+    config = (device.type, verbose, git_hash, backend)
+    if _CASE_WORKER is not None and (_CASE_WORKER_CONFIG != config or not _CASE_WORKER.is_alive()):
+        _close_case_worker()
+    if _CASE_WORKER is None:
+        _CASE_WORKER = _CaseWorker(
+            device_type=device.type,
+            verbose=verbose,
+            git_hash=git_hash,
+            backend=backend,
+        )
+        _CASE_WORKER_CONFIG = config
+        if not _CASE_WORKER_ATEXIT_REGISTERED:
+            atexit.register(_close_case_worker)
+            _CASE_WORKER_ATEXIT_REGISTERED = True
+    return _CASE_WORKER
 
 
 def _run_case_local(
@@ -600,22 +741,23 @@ def run_case(
             aer_adapter=aer_adapter,
         )
 
-    ctx = mp.get_context("spawn")
-    parent_conn, child_conn = ctx.Pipe(duplex=False)
-    worker = ctx.Process(
-        target=_run_case_worker,
-        kwargs={
-            "case": case,
-            "device_type": device.type,
-            "verbose": verbose,
-            "git_hash": git_hash,
-            "backend": backend,
-            "case_timeout": case_timeout,
-            "conn": child_conn,
-        },
+    worker = _ensure_case_worker(
+        device=device,
+        verbose=verbose,
+        git_hash=git_hash,
+        backend=backend,
     )
-    worker.start()
-    child_conn.close()
+    try:
+        worker.send_case(case, case_timeout)
+    except (BrokenPipeError, EOFError, OSError):
+        _close_case_worker()
+        worker = _ensure_case_worker(
+            device=device,
+            verbose=verbose,
+            git_hash=git_hash,
+            backend=backend,
+        )
+        worker.send_case(case, case_timeout)
 
     in_flight_shot: int | None = None
     shot_start_monotonic: float | None = None
@@ -624,25 +766,36 @@ def run_case(
     worker_result: dict | None = None
     worker_error: dict | None = None
 
+    def _consume_event(msg: dict) -> bool:
+        nonlocal in_flight_shot
+        nonlocal shot_start_monotonic
+        nonlocal worker_result
+        nonlocal worker_error
+        kind = msg.get("kind")
+        if kind == "shot_start":
+            in_flight_shot = int(msg["shots"])
+            shot_start_monotonic = time.perf_counter()
+            return False
+        if kind == "shot_done":
+            shot_value = int(msg["shots"])
+            partial_times[str(shot_value)] = float(msg["wall_elapsed"])
+            partial_cpu_times[str(shot_value)] = float(msg["cpu_elapsed"])
+            in_flight_shot = None
+            shot_start_monotonic = None
+            return False
+        if kind == "result":
+            worker_result = msg["result"]
+            return True
+        if kind == "error":
+            worker_error = msg
+            return True
+        return False
+
     while True:
         try:
-            if parent_conn.poll(0.05):
-                msg = parent_conn.recv()
-                kind = msg.get("kind")
-                if kind == "shot_start":
-                    in_flight_shot = int(msg["shots"])
-                    shot_start_monotonic = time.perf_counter()
-                elif kind == "shot_done":
-                    shot_value = int(msg["shots"])
-                    partial_times[str(shot_value)] = float(msg["wall_elapsed"])
-                    partial_cpu_times[str(shot_value)] = float(msg["cpu_elapsed"])
-                    in_flight_shot = None
-                    shot_start_monotonic = None
-                elif kind == "result":
-                    worker_result = msg["result"]
-                    break
-                elif kind == "error":
-                    worker_error = msg
+            if worker.poll_event(0.05):
+                msg = worker.recv_event()
+                if _consume_event(msg):
                     break
         except EOFError:
             pass
@@ -652,7 +805,7 @@ def run_case(
             and shot_start_monotonic is not None
             and (time.perf_counter() - shot_start_monotonic) > case_timeout
         ):
-            _terminate_process(worker)
+            _close_case_worker()
             abort_reason = f"timeout at {in_flight_shot} shots (>{case_timeout:.0f}s hard limit)"
             timed_out_row = _build_timeout_row(
                 case,
@@ -665,26 +818,13 @@ def run_case(
             )
             if verbose:
                 _print_case_row_verbose(timed_out_row)
-            parent_conn.close()
             return timed_out_row
 
         if not worker.is_alive():
-            while True:
-                try:
-                    if not parent_conn.poll():
-                        break
-                    msg = parent_conn.recv()
-                except EOFError:
-                    break
-                kind = msg.get("kind")
-                if kind == "result":
-                    worker_result = msg["result"]
-                elif kind == "error":
-                    worker_error = msg
+            for msg in worker.drain_events():
+                _consume_event(msg)
+            _close_case_worker()
             break
-
-    parent_conn.close()
-    worker.join(timeout=0)
 
     if worker_result is not None:
         return worker_result
@@ -884,6 +1024,8 @@ def main() -> None:
         # Process-level stats
         peak_rss_mb = get_peak_rss_mb()
         print(f"Peak RSS: {peak_rss_mb:.0f} MB")
+
+    _close_case_worker()
 
     if failures:
         print(f"\nFAILED: {', '.join(failures)}")
