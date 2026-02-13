@@ -543,9 +543,8 @@ def _fuse_segment_local_diagonals(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
                 continue
             fused_run.append(Gate(None, t0, t1, diagonal=torch.from_numpy(vals.copy())))
 
-        # Skip low-payoff rewrites: keep original ordering unless this pass
-        # materially compresses the diagonal run.
-        if (j - i) - len(fused_run) < 3:
+        # Skip no-op rewrites: require actual gate-count compression.
+        if len(fused_run) >= (j - i):
             result.extend(gates[i:j])
             i = j
             continue
