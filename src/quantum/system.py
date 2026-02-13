@@ -104,6 +104,7 @@ class _MonomialStreamSpec:
 
 
 _MONOMIAL_STREAM_ATTR = "_monomial_stream_spec"
+_INT32_MAX = np.iinfo(np.int32).max
 
 
 def _gate_monomial_stream_spec(gate: Gate) -> _MonomialStreamSpec | None:
@@ -1594,6 +1595,320 @@ def _sample_from_dynamic_dist(
     return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
 
 
+def _requires_split_mps_state(*, n_qubits: int, device: torch.device) -> bool:
+    """Whether MPS complex64 state allocation exceeds the backend INT_MAX limit."""
+    if device.type != "mps":
+        return False
+    # MPS complex64 paths are constrained by underlying float element count.
+    return (1 << n_qubits) * 2 > _INT32_MAX
+
+
+def _can_use_split_static_executor(
+    *,
+    compiled: _DynamicCompiledGraph,
+    n_qubits: int,
+    device: torch.device,
+) -> bool:
+    """Check if static execution can run with a split-MSB state layout."""
+    if not _requires_split_mps_state(n_qubits=n_qubits, device=device):
+        return False
+    if compiled.node_count != 0:
+        return False
+
+    for step in compiled.steps:
+        if not isinstance(step, _DynamicSegmentStep):
+            return False
+        for gate in step.gates:
+            if _gate_monomial_stream_spec(gate) is not None:
+                return False
+            if len(gate.targets) not in (1, 2):
+                return False
+    return True
+
+
+def _shift_gate_targets_for_split(gate: Gate) -> Gate:
+    """Create a shallow target-shifted gate clone for split-MSB execution."""
+    shifted = object.__new__(Gate)
+    shifted._tensor = gate._tensor
+    shifted._diagonal = gate._diagonal
+    shifted._permutation = gate._permutation
+    shifted._permutation_factors = gate._permutation_factors
+    shifted.targets = [target - 1 for target in gate.targets]
+    return shifted
+
+
+def _apply_split_q0_single_dense(
+    *,
+    low_state: torch.Tensor,
+    high_state: torch.Tensor,
+    mat2: np.ndarray,
+    out_low: torch.Tensor,
+    out_high: torch.Tensor,
+) -> None:
+    """Apply a 1q gate on split qubit q0 across two half-state tensors."""
+    g00 = complex(mat2[0, 0])
+    g01 = complex(mat2[0, 1])
+    g10 = complex(mat2[1, 0])
+    g11 = complex(mat2[1, 1])
+    torch.mul(low_state, g00, out=out_low)
+    out_low.add_(high_state, alpha=g01)
+    torch.mul(low_state, g10, out=out_high)
+    out_high.add_(high_state, alpha=g11)
+
+
+def _apply_split_q0_two_dense(
+    *,
+    low_state: torch.Tensor,
+    high_state: torch.Tensor,
+    other_target: int,
+    n_split_qubits: int,
+    mat4: np.ndarray,
+    out_low: torch.Tensor,
+    out_high: torch.Tensor,
+) -> None:
+    """Apply a 2q gate on pair (q0, other_target) in split-MSB form."""
+    t = other_target - 1
+    a = 1 << t
+    b = 1 << (n_split_qubits - t - 1)
+
+    low = low_state.view(1, a, 2, b)
+    high = high_state.view(1, a, 2, b)
+    out_l = out_low.view(1, a, 2, b)
+    out_h = out_high.view(1, a, 2, b)
+
+    l0 = low[:, :, 0, :]
+    l1 = low[:, :, 1, :]
+    h0 = high[:, :, 0, :]
+    h1 = high[:, :, 1, :]
+
+    r00 = complex(mat4[0, 0]); r01 = complex(mat4[0, 1]); r02 = complex(mat4[0, 2]); r03 = complex(mat4[0, 3])
+    r10 = complex(mat4[1, 0]); r11 = complex(mat4[1, 1]); r12 = complex(mat4[1, 2]); r13 = complex(mat4[1, 3])
+    r20 = complex(mat4[2, 0]); r21 = complex(mat4[2, 1]); r22 = complex(mat4[2, 2]); r23 = complex(mat4[2, 3])
+    r30 = complex(mat4[3, 0]); r31 = complex(mat4[3, 1]); r32 = complex(mat4[3, 2]); r33 = complex(mat4[3, 3])
+
+    torch.mul(l0, r00, out=out_l[:, :, 0, :])
+    out_l[:, :, 0, :].add_(l1, alpha=r01).add_(h0, alpha=r02).add_(h1, alpha=r03)
+
+    torch.mul(l0, r10, out=out_l[:, :, 1, :])
+    out_l[:, :, 1, :].add_(l1, alpha=r11).add_(h0, alpha=r12).add_(h1, alpha=r13)
+
+    torch.mul(l0, r20, out=out_h[:, :, 0, :])
+    out_h[:, :, 0, :].add_(l1, alpha=r21).add_(h0, alpha=r22).add_(h1, alpha=r23)
+
+    torch.mul(l0, r30, out=out_h[:, :, 1, :])
+    out_h[:, :, 1, :].add_(l1, alpha=r31).add_(h0, alpha=r32).add_(h1, alpha=r33)
+
+
+def _register_codes_from_basis_samples(
+    *,
+    basis_samples: torch.Tensor,
+    terminal_measurements: tuple[Measurement, ...],
+    n_qubits: int,
+    n_bits: int,
+) -> torch.Tensor:
+    """Map sampled basis indices to classical register codes."""
+    if n_bits == 0:
+        return torch.empty(0, dtype=torch.int64)
+    if not terminal_measurements:
+        return torch.zeros(basis_samples.shape[0], dtype=torch.int64, device=basis_samples.device)
+    if (
+        n_bits == n_qubits
+        and len(terminal_measurements) == n_qubits
+        and all(m.qubit == m.bit for m in terminal_measurements)
+    ):
+        return basis_samples
+
+    register_codes = torch.zeros(basis_samples.shape[0], dtype=torch.int64, device=basis_samples.device)
+    for measurement in terminal_measurements:
+        qubit_shift = n_qubits - 1 - measurement.qubit
+        bit_shift = n_bits - 1 - measurement.bit
+        measured_bit = (basis_samples >> qubit_shift) & 1
+        register_codes |= measured_bit << bit_shift
+    return register_codes
+
+
+def _sample_from_split_static_cdfs(
+    *,
+    cdf_low: torch.Tensor | None,
+    cdf_high: torch.Tensor | None,
+    p_low_total: float,
+    half_dim: int,
+    terminal_measurements: tuple[Measurement, ...],
+    num_shots: int,
+    n_qubits: int,
+    n_bits: int,
+) -> dict[str, int]:
+    """Sample static terminal outcomes from split-MSB per-half CDFs."""
+    if num_shots == 0:
+        return {}
+    if n_bits == 0:
+        return {"": num_shots}
+
+    if cdf_low is None:
+        shots_low = 0
+        shots_high = num_shots
+    elif cdf_high is None:
+        shots_low = num_shots
+        shots_high = 0
+    else:
+        shots_low = _sample_binomial_count(shots=num_shots, p1=p_low_total)
+        shots_high = num_shots - shots_low
+
+    basis_chunks: list[torch.Tensor] = []
+    if shots_low > 0:
+        if cdf_low is None:
+            raise RuntimeError("Invalid split CDF state: missing low CDF with nonzero low-shot count")
+        randoms_low = torch.rand(shots_low, device=cdf_low.device)
+        samples_low = torch.searchsorted(cdf_low, randoms_low).clamp(max=cdf_low.shape[0] - 1).to(dtype=torch.int64)
+        if samples_low.device.type != "cpu":
+            samples_low = samples_low.to("cpu")
+        basis_chunks.append(samples_low)
+
+    if shots_high > 0:
+        if cdf_high is None:
+            raise RuntimeError("Invalid split CDF state: missing high CDF with nonzero high-shot count")
+        randoms_high = torch.rand(shots_high, device=cdf_high.device)
+        samples_high = torch.searchsorted(cdf_high, randoms_high).clamp(max=cdf_high.shape[0] - 1).to(dtype=torch.int64)
+        samples_high = samples_high + half_dim
+        if samples_high.device.type != "cpu":
+            samples_high = samples_high.to("cpu")
+        basis_chunks.append(samples_high)
+
+    if not basis_chunks:
+        return {}
+    basis_samples = basis_chunks[0] if len(basis_chunks) == 1 else torch.cat(basis_chunks, dim=0)
+
+    register_codes = _register_codes_from_basis_samples(
+        basis_samples=basis_samples,
+        terminal_measurements=terminal_measurements,
+        n_qubits=n_qubits,
+        n_bits=n_bits,
+    )
+    return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
+
+
+def _run_split_static_simulation(
+    *,
+    compiled: _DynamicCompiledGraph,
+    num_shots: int,
+    n_qubits: int,
+    n_bits: int,
+    device: torch.device,
+) -> tuple[dict[str, int], tuple[torch.Tensor | None, torch.Tensor | None, float]]:
+    """Execute static circuits with split-MSB state layout for large MPS sizes."""
+    if n_qubits < 2:
+        raise RuntimeError("Split static execution requires at least 2 qubits")
+
+    n_split = n_qubits - 1
+    half_dim = 1 << n_split
+
+    low_system = BatchedQuantumSystem(
+        n_qubits=n_split,
+        n_bits=0,
+        batch_size=1,
+        device=device,
+    )
+    high_system = BatchedQuantumSystem(
+        n_qubits=n_split,
+        n_bits=0,
+        batch_size=1,
+        device=device,
+    )
+    high_system.state_vectors.zero_()
+
+    shifted_gate_cache: dict[int, Gate] = {}
+
+    for step in compiled.steps:
+        if not isinstance(step, _DynamicSegmentStep):
+            raise RuntimeError("Split static executor only supports static segment-only graphs")
+
+        for gate in step.gates:
+            if _gate_monomial_stream_spec(gate) is not None:
+                raise RuntimeError("Split static executor does not support monomial stream pseudo-gates")
+
+            targets = tuple(gate.targets)
+            if len(targets) not in (1, 2):
+                raise RuntimeError(f"Unsupported gate arity in split static executor: {len(targets)}")
+
+            if 0 not in targets:
+                shifted = shifted_gate_cache.get(id(gate))
+                if shifted is None:
+                    shifted = _shift_gate_targets_for_split(gate)
+                    shifted_gate_cache[id(gate)] = shifted
+                _ = low_system.apply_gate(shifted)
+                _ = high_system.apply_gate(shifted)
+                continue
+
+            out_low = low_system._ensure_alt_state()
+            out_high = high_system._ensure_alt_state()
+
+            if len(targets) == 1:
+                mat2 = _gate_to_np_matrix(gate, 2)
+                _apply_split_q0_single_dense(
+                    low_state=low_system.state_vectors,
+                    high_state=high_system.state_vectors,
+                    mat2=mat2,
+                    out_low=out_low,
+                    out_high=out_high,
+                )
+            else:
+                other_target = targets[0] if targets[1] == 0 else targets[1]
+                mat4 = _gate_matrix_on_ordered_pair(gate, 0, other_target)
+                _apply_split_q0_two_dense(
+                    low_state=low_system.state_vectors,
+                    high_state=high_system.state_vectors,
+                    other_target=other_target,
+                    n_split_qubits=n_split,
+                    mat4=mat4,
+                    out_low=out_low,
+                    out_high=out_high,
+                )
+
+            low_system.state_vectors, low_system._alt_state = low_system._alt_state, low_system.state_vectors
+            high_system.state_vectors, high_system._alt_state = high_system._alt_state, high_system.state_vectors
+
+    probs_low = (torch.abs(low_system.state_vectors[0]) ** 2)
+    probs_high = (torch.abs(high_system.state_vectors[0]) ** 2)
+    if probs_low.device.type != "cpu":
+        probs_low = probs_low.to("cpu")
+    if probs_high.device.type != "cpu":
+        probs_high = probs_high.to("cpu")
+
+    low_sum = float(probs_low.sum().item())
+    high_sum = float(probs_high.sum().item())
+    total = low_sum + high_sum
+    if total <= 0.0:
+        raise RuntimeError("Split static executor produced zero total probability mass")
+
+    cdf_low: torch.Tensor | None = None
+    cdf_high: torch.Tensor | None = None
+    p_low_total = low_sum / total
+    if low_sum > 0.0:
+        cdf_low = torch.cumsum((probs_low / low_sum).to(torch.float32), dim=0)
+    if high_sum > 0.0:
+        cdf_high = torch.cumsum((probs_high / high_sum).to(torch.float32), dim=0)
+
+    counts = _sample_from_split_static_cdfs(
+        cdf_low=cdf_low,
+        cdf_high=cdf_high,
+        p_low_total=p_low_total,
+        half_dim=half_dim,
+        terminal_measurements=compiled.terminal_measurements,
+        num_shots=num_shots,
+        n_qubits=n_qubits,
+        n_bits=n_bits,
+    )
+    return counts, (cdf_low, cdf_high, p_low_total)
+
+
+def _evict_split_static_cdf_entries(*, keep_cache_key: int) -> None:
+    """Keep at most one split static CDF cache to avoid runaway memory usage."""
+    for key, entry in _circuit_compilation_cache.items():
+        if key == keep_cache_key:
+            continue
+        entry.cached_split_static_cdf = None
+
+
 def _state_merge_signature(
     state_vector: torch.Tensor,
     *,
@@ -1958,6 +2273,7 @@ class _CompiledCircuitCache:
     effective_device: torch.device  # actual device used (after CPU override)
     cached_sampling_cdf: torch.Tensor | None = None  # dense cumulative probs for searchsorted
     cached_sparse_static_cdf: tuple[torch.Tensor, torch.Tensor] | None = None  # (codes, cdf) sparse static
+    cached_split_static_cdf: tuple[torch.Tensor | None, torch.Tensor | None, float] | None = None  # (cdf_low, cdf_high, p_low)
     cached_dynamic_dist: tuple[torch.Tensor, torch.Tensor] | None = None  # (codes, cdf) for dynamic circuits
 
 
@@ -1987,6 +2303,11 @@ def _run_compiled_simulation(
         initial_state_np = cached.initial_state_np
         segment_scalar_caches = cached.segment_scalar_caches
         device = cached.effective_device
+        use_split_static_executor = _can_use_split_static_executor(
+            compiled=compiled,
+            n_qubits=n_qubits,
+            device=device,
+        )
 
         # Fast path: cached sparse CDF for static circuits with few outcomes.
         # Searchsorted on K entries (K << 2^n) instead of 2^n.
@@ -1995,6 +2316,20 @@ def _run_compiled_simulation(
             codes, sparse_cdf = cached.cached_sparse_static_cdf
             return _sample_from_dynamic_dist(
                 codes=codes, cdf=sparse_cdf, num_shots=num_shots, n_bits=n_bits,
+            )
+
+        # Fast path: cached split-MSB CDFs for large static MPS circuits.
+        if use_split_static_executor and cached.cached_split_static_cdf is not None:
+            cdf_low, cdf_high, p_low_total = cached.cached_split_static_cdf
+            return _sample_from_split_static_cdfs(
+                cdf_low=cdf_low,
+                cdf_high=cdf_high,
+                p_low_total=p_low_total,
+                half_dim=1 << (n_qubits - 1),
+                terminal_measurements=compiled.terminal_measurements,
+                num_shots=num_shots,
+                n_qubits=n_qubits,
+                n_bits=n_bits,
             )
 
         # Fast path: cached dense CDF for static circuits — skip evolution entirely.
@@ -2022,6 +2357,11 @@ def _run_compiled_simulation(
     else:
         input_device_type = device.type
         compiled = _compile_execution_graph(circuit)
+        use_split_static_executor = _can_use_split_static_executor(
+            compiled=compiled,
+            n_qubits=n_qubits,
+            device=device,
+        )
 
         # CPU avoids MPS kernel launch overhead (~170μs/gate) and item() sync
         # costs (~108μs/call). Dynamic circuits benefit more due to item() savings;
@@ -2090,7 +2430,9 @@ def _run_compiled_simulation(
         # is a separable tensor product computed analytically via numpy kron in
         # O(2^n) time, avoiding N expensive MPS kernel dispatches.
         initial_state_np: np.ndarray | None = None
-        if compiled.steps and isinstance(compiled.steps[0], _DynamicSegmentStep):
+        if (not use_split_static_executor
+                and compiled.steps
+                and isinstance(compiled.steps[0], _DynamicSegmentStep)):
             initial_state_np, n_consumed = _precompute_initial_1q_block(
                 compiled.steps[0].gates, n_qubits
             )
@@ -2111,6 +2453,7 @@ def _run_compiled_simulation(
         # diagonal/permutation passes dominate runtime.
         enable_monomial_stream = (
             device.type == "mps"
+            and not use_split_static_executor
             and os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
         )
         if enable_monomial_stream:
@@ -2160,6 +2503,20 @@ def _run_compiled_simulation(
             input_device_type=input_device_type,
             effective_device=device,
         )
+
+    if use_split_static_executor:
+        result, split_cdf = _run_split_static_simulation(
+            compiled=compiled,
+            num_shots=num_shots,
+            n_qubits=n_qubits,
+            n_bits=n_bits,
+            device=device,
+        )
+        cached_entry = _circuit_compilation_cache.get(cache_key)
+        if cached_entry is not None:
+            _evict_split_static_cdf_entries(keep_cache_key=cache_key)
+            cached_entry.cached_split_static_cdf = split_cdf
+        return result
 
     gate_system = BatchedQuantumSystem(
         n_qubits=n_qubits,
