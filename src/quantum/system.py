@@ -525,11 +525,13 @@ def _fuse_segment_local_diagonals(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
             else:
                 twoq_fused[key] *= vals2
 
+        fused_run: list[Gate] = []
+
         for q in oneq_order:
             vals = oneq_fused[q]
             if np.allclose(vals, np.array([1.0 + 0.0j, 1.0 + 0.0j], dtype=np.complex64), atol=1e-6):
                 continue
-            result.append(Gate(None, q, diagonal=torch.from_numpy(vals.copy())))
+            fused_run.append(Gate(None, q, diagonal=torch.from_numpy(vals.copy())))
 
         for t0, t1 in twoq_order:
             vals = twoq_fused[(t0, t1)]
@@ -539,7 +541,16 @@ def _fuse_segment_local_diagonals(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
                 atol=1e-6,
             ):
                 continue
-            result.append(Gate(None, t0, t1, diagonal=torch.from_numpy(vals.copy())))
+            fused_run.append(Gate(None, t0, t1, diagonal=torch.from_numpy(vals.copy())))
+
+        # Skip low-payoff rewrites: keep original ordering unless this pass
+        # materially compresses the diagonal run.
+        if (j - i) - len(fused_run) < 3:
+            result.extend(gates[i:j])
+            i = j
+            continue
+
+        result.extend(fused_run)
 
         i = j
 
