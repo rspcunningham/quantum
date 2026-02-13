@@ -1,6 +1,7 @@
 """Targeted profiling for a single benchmark case."""
 
 import argparse
+import gc
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import torch
 
 from benchmarks.cases import ALL_CASES
 from quantum import run_simulation, infer_resources
+import quantum.system as quantum_system_module
 
 
 CASE_MAP = {case_fn().name: case_fn for case_fn in ALL_CASES}
@@ -28,6 +30,19 @@ def sync_device(device: torch.device) -> None:
         torch.mps.synchronize()
 
 
+def clear_runtime_caches(device: torch.device) -> None:
+    """Clear simulator and backend allocator caches before a cold profile."""
+    circuit_cache = getattr(quantum_system_module, "_circuit_compilation_cache", None)
+    if isinstance(circuit_cache, dict):
+        circuit_cache.clear()
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps" and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
+    sync_device(device)
+
+
 def main() -> None:
     case_names = list(CASE_MAP.keys())
 
@@ -39,6 +54,11 @@ def main() -> None:
     parser.add_argument("shots", type=int, help="Number of shots")
     parser.add_argument("-o", "--output", type=str, default=None, help="Output trace path (default: benchmarks/results/trace_{case}_{shots}.json)")
     parser.add_argument("--no-stack", action="store_true", help="Disable stack traces (smaller output files)")
+    parser.add_argument(
+        "--cold",
+        action="store_true",
+        help="Profile true first-call behavior: clear caches and skip warmup",
+    )
     args = parser.parse_args()
 
     device = get_device()
@@ -60,11 +80,18 @@ def main() -> None:
         ),
     ]
 
-    print(f"Profiling {args.case} ({n_qubits} qubits, {args.shots} shots) on {device.type}")
+    profile_mode = "cold" if args.cold else "warm"
+    print(
+        f"Profiling {args.case} ({n_qubits} qubits, {args.shots} shots) on "
+        f"{device.type} [{profile_mode}]"
+    )
 
-    # Warmup
-    run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
-    sync_device(device)
+    if args.cold:
+        clear_runtime_caches(device)
+    else:
+        # Warmup to focus on steady-state operator costs.
+        run_simulation(case.circuit, 1, n_qubits=n_qubits, device=device)
+        sync_device(device)
 
     with torch.profiler.profile(
         activities=activities,

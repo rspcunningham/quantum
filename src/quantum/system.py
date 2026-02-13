@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Callable
@@ -178,6 +179,125 @@ def _should_run_heavy_compile_fusions(
     # For circuits that cannot use distribution caching, keep heavy fusion only
     # while state dimension is still moderate.
     return n_qubits <= 16
+
+
+_MPS_MONOMIAL_SHADER_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+inline uint _subindex_for_targets(
+    uint idx,
+    constant int* targets,
+    uint k,
+    uint n_qubits
+) {
+    uint sub = 0;
+    for (uint j = 0; j < k; ++j) {
+        uint bitpos = n_qubits - 1u - uint(targets[j]);
+        uint bit = (idx >> bitpos) & 1u;
+        sub |= bit << (k - 1u - j);
+    }
+    return sub;
+}
+
+inline uint _source_index_for_targets(
+    uint idx,
+    uint source_subindex,
+    constant int* targets,
+    uint k,
+    uint n_qubits
+) {
+    uint src = idx;
+    for (uint j = 0; j < k; ++j) {
+        uint bitpos = n_qubits - 1u - uint(targets[j]);
+        uint mask = 1u << bitpos;
+        src &= ~mask;
+        uint bit = (source_subindex >> (k - 1u - j)) & 1u;
+        src |= bit << bitpos;
+    }
+    return src;
+}
+
+kernel void diagonal_subset(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int* targets,
+    constant int& k,
+    device const float2* diagonal,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint sub = _subindex_for_targets(idx, targets, uint(k), uint(n_qubits));
+    float2 v = in_state[gid];
+    float2 d = diagonal[sub];
+    out_state[gid] = float2(v.x * d.x - v.y * d.y, v.x * d.y + v.y * d.x);
+}
+
+kernel void permute_subset(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int* targets,
+    constant int& k,
+    constant int* permutation,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint sub = _subindex_for_targets(idx, targets, uint(k), uint(n_qubits));
+    uint src_sub = uint(permutation[sub]);
+    uint src_idx = _source_index_for_targets(idx, src_sub, targets, uint(k), uint(n_qubits));
+    out_state[gid] = in_state[batch * uint(dim) + src_idx];
+}
+
+kernel void permute_subset_with_phase(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int* targets,
+    constant int& k,
+    constant int* permutation,
+    device const float2* factors,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint sub = _subindex_for_targets(idx, targets, uint(k), uint(n_qubits));
+    uint src_sub = uint(permutation[sub]);
+    uint src_idx = _source_index_for_targets(idx, src_sub, targets, uint(k), uint(n_qubits));
+    float2 v = in_state[batch * uint(dim) + src_idx];
+    float2 p = factors[sub];
+    out_state[gid] = float2(v.x * p.x - v.y * p.y, v.x * p.y + v.y * p.x);
+}
+"""
+
+
+@lru_cache(maxsize=1)
+def _mps_monomial_kernel_library() -> object | None:
+    """Compile and cache custom MPS kernels for subset monomial gates."""
+    if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
+        return None
+    return torch.mps.compile_shader(_MPS_MONOMIAL_SHADER_SOURCE)
 
 
 def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
@@ -1658,10 +1778,13 @@ class BatchedQuantumSystem:
     _gate_tensors: dict[int, torch.Tensor]
     _gate_diagonals: dict[int, torch.Tensor]
     _gate_permutations: dict[int, torch.Tensor]
+    _gate_permutations_i32: dict[int, torch.Tensor]
     _gate_permutation_factors: dict[int, torch.Tensor]
+    _targets_i32: dict[tuple[int, ...], torch.Tensor]
     _diagonal_subindices: dict[tuple[int, ...], torch.Tensor]
     _permutation_source_indices: dict[tuple[tuple[int, ...], int], torch.Tensor]
     _permutation_phase_factors: dict[tuple[tuple[int, ...], int], torch.Tensor]
+    _mps_monomial_kernels: object | None
 
     def __init__(self, n_qubits: int, n_bits: int, batch_size: int, device: torch.device):
         self.n_qubits = n_qubits
@@ -1674,7 +1797,9 @@ class BatchedQuantumSystem:
         self._gate_tensors = {}
         self._gate_diagonals = {}
         self._gate_permutations = {}
+        self._gate_permutations_i32 = {}
         self._gate_permutation_factors = {}
+        self._targets_i32 = {}
         self._diagonal_subindices = {}
         self._permutation_source_indices = {}
         self._permutation_phase_factors = {}
@@ -1685,6 +1810,7 @@ class BatchedQuantumSystem:
         self.bit_registers = torch.zeros((batch_size, n_bits), dtype=torch.int32, device=device)
         self._alt_state: torch.Tensor | None = None
         self._use_double_buffer = device.type != "cpu"
+        self._mps_monomial_kernels = _mps_monomial_kernel_library() if device.type == "mps" else None
 
     def _ensure_alt_state(self) -> torch.Tensor:
         """Return a pre-allocated alternate state buffer for double-buffer swaps."""
@@ -1799,6 +1925,7 @@ class BatchedQuantumSystem:
 
         targets = tuple(gate.targets)
         k = len(targets)
+        dim = 1 << self.n_qubits
 
         if k == self.n_qubits:
             factors = diagonal if diagonal.device == self.device else diagonal.to(self.device)
@@ -1830,6 +1957,23 @@ class BatchedQuantumSystem:
             state[:, :, 1, :, 1, :] *= d[3]
             return self
 
+        if self._mps_monomial_kernels is not None:
+            targets_i32 = self._device_targets_i32(targets)
+            diagonal_device = self._device_gate_diagonal(diagonal)
+            out_state = self._ensure_alt_state()
+            self._mps_monomial_kernels.diagonal_subset(
+                self.state_vectors.reshape(-1),
+                out_state.reshape(-1),
+                self.n_qubits,
+                dim,
+                self.batch_size,
+                targets_i32,
+                k,
+                diagonal_device.reshape(-1),
+            )
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+            return self
+
         diagonal_device = self._device_gate_diagonal(diagonal)
         subindex = self._diagonal_subindex_for_targets(targets)
         factors = diagonal_device[subindex]
@@ -1842,6 +1986,7 @@ class BatchedQuantumSystem:
 
         targets = tuple(gate.targets)
         k = len(targets)
+        dim = 1 << self.n_qubits
 
         if k == self.n_qubits:
             perm = permutation if permutation.device == self.device else permutation.to(dtype=torch.int64, device=self.device)
@@ -1851,6 +1996,40 @@ class BatchedQuantumSystem:
                 pf = factors if factors.device == self.device else factors.to(self.device)
                 state = state * pf.unsqueeze(0)
             self.state_vectors = state
+            return self
+
+        if self._mps_monomial_kernels is not None:
+            permutation_i32 = self._device_gate_permutation_i32(permutation)
+            targets_i32 = self._device_targets_i32(targets)
+            out_state = self._ensure_alt_state()
+
+            factors = gate.permutation_factors
+            if factors is None:
+                self._mps_monomial_kernels.permute_subset(
+                    self.state_vectors.reshape(-1),
+                    out_state.reshape(-1),
+                    self.n_qubits,
+                    dim,
+                    self.batch_size,
+                    targets_i32,
+                    k,
+                    permutation_i32.reshape(-1),
+                )
+            else:
+                factors_device = self._device_gate_permutation_factors(factors)
+                self._mps_monomial_kernels.permute_subset_with_phase(
+                    self.state_vectors.reshape(-1),
+                    out_state.reshape(-1),
+                    self.n_qubits,
+                    dim,
+                    self.batch_size,
+                    targets_i32,
+                    k,
+                    permutation_i32.reshape(-1),
+                    factors_device.reshape(-1),
+                )
+
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
             return self
 
         permutation_device = self._device_gate_permutation(permutation)
@@ -2048,6 +2227,17 @@ class BatchedQuantumSystem:
         self._gate_permutations[key] = moved
         return moved
 
+    def _device_gate_permutation_i32(self, permutation: torch.Tensor) -> torch.Tensor:
+        key = id(permutation)
+        cached = self._gate_permutations_i32.get(key)
+        if cached is not None:
+            return cached
+
+        permutation_i32 = permutation.to(dtype=torch.int32)
+        moved = permutation_i32 if permutation_i32.device == self.device else permutation_i32.to(self.device)
+        self._gate_permutations_i32[key] = moved
+        return moved
+
     def _device_gate_permutation_factors(self, factors: torch.Tensor) -> torch.Tensor:
         key = id(factors)
         cached = self._gate_permutation_factors.get(key)
@@ -2057,6 +2247,15 @@ class BatchedQuantumSystem:
         moved = factors if factors.device == self.device else factors.to(self.device)
         self._gate_permutation_factors[key] = moved
         return moved
+
+    def _device_targets_i32(self, targets: tuple[int, ...]) -> torch.Tensor:
+        cached = self._targets_i32.get(targets)
+        if cached is not None:
+            return cached
+
+        tensor = torch.tensor(targets, dtype=torch.int32, device=self.device)
+        self._targets_i32[targets] = tensor
+        return tensor
 
     def _diagonal_subindex_for_targets(self, targets: tuple[int, ...]) -> torch.Tensor:
         cached = self._diagonal_subindices.get(targets)
