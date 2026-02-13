@@ -384,6 +384,66 @@ kernel void monomial_stream(
     float2 v = in_state[batch * uint(dim) + src_idx];
     out_state[gid] = _cmul(phase, v);
 }
+
+kernel void diagonal_full_state(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    device const float2* diagonal,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint idx = gid % uint(dim);
+    float2 v = in_state[gid];
+    float2 d = diagonal[idx];
+    out_state[gid] = _cmul(v, d);
+}
+
+kernel void permute_full_state(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    device const int* permutation,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint src_idx = uint(permutation[idx]);
+    out_state[gid] = in_state[batch * uint(dim) + src_idx];
+}
+
+kernel void permute_full_state_with_phase(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    device const int* permutation,
+    device const float2* factors,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint src_idx = uint(permutation[idx]);
+    float2 v = in_state[batch * uint(dim) + src_idx];
+    float2 p = factors[idx];
+    out_state[gid] = _cmul(v, p);
+}
 """
 
 
@@ -1796,7 +1856,10 @@ def _can_use_split_static_executor(
     device: torch.device,
 ) -> bool:
     """Check if static execution can run with split real/imag state layout."""
-    _ = (n_qubits, device)
+    if n_qubits < 30:
+        return False
+    if device.type != "mps":
+        return False
     if compiled.node_count != 0:
         return False
 
@@ -3644,8 +3707,38 @@ class BatchedQuantumSystem:
         dim = 1 << self.n_qubits
 
         if k == self.n_qubits:
-            factors = diagonal if diagonal.device == self.device else diagonal.to(self.device)
-            self.state_vectors = self.state_vectors * factors.unsqueeze(0)
+            if self._mps_monomial_kernels is not None:
+                diagonal_device = self._device_gate_diagonal(diagonal)
+                out_state = self._ensure_alt_state()
+                self._mps_monomial_kernels.diagonal_full_state(
+                    self.state_vectors.reshape(-1),
+                    out_state.reshape(-1),
+                    self.n_qubits,
+                    dim,
+                    self.batch_size,
+                    diagonal_device.reshape(-1),
+                )
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+            else:
+                factors = diagonal if diagonal.device == self.device else diagonal.to(self.device)
+                self.state_vectors = self.state_vectors * factors.unsqueeze(0)
+            return self
+
+        if self._mps_monomial_kernels is not None:
+            targets_i32 = self._device_targets_i32(targets)
+            diagonal_device = self._device_gate_diagonal(diagonal)
+            out_state = self._ensure_alt_state()
+            self._mps_monomial_kernels.diagonal_subset(
+                self.state_vectors.reshape(-1),
+                out_state.reshape(-1),
+                self.n_qubits,
+                dim,
+                self.batch_size,
+                targets_i32,
+                k,
+                diagonal_device.reshape(-1),
+            )
+            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
             return self
 
         if k == 1:
@@ -3673,23 +3766,6 @@ class BatchedQuantumSystem:
             state[:, :, 1, :, 1, :] *= d[3]
             return self
 
-        if self._mps_monomial_kernels is not None:
-            targets_i32 = self._device_targets_i32(targets)
-            diagonal_device = self._device_gate_diagonal(diagonal)
-            out_state = self._ensure_alt_state()
-            self._mps_monomial_kernels.diagonal_subset(
-                self.state_vectors.reshape(-1),
-                out_state.reshape(-1),
-                self.n_qubits,
-                dim,
-                self.batch_size,
-                targets_i32,
-                k,
-                diagonal_device.reshape(-1),
-            )
-            self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
-            return self
-
         diagonal_device = self._device_gate_diagonal(diagonal)
         subindex = self._diagonal_subindex_for_targets(targets)
         factors = diagonal_device[subindex]
@@ -3705,6 +3781,32 @@ class BatchedQuantumSystem:
         dim = 1 << self.n_qubits
 
         if k == self.n_qubits:
+            if self._mps_monomial_kernels is not None:
+                perm_i32 = self._device_gate_permutation_i32(permutation)
+                out_state = self._ensure_alt_state()
+                factors = gate.permutation_factors
+                if factors is None:
+                    self._mps_monomial_kernels.permute_full_state(
+                        self.state_vectors.reshape(-1),
+                        out_state.reshape(-1),
+                        self.n_qubits,
+                        dim,
+                        self.batch_size,
+                        perm_i32.reshape(-1),
+                    )
+                else:
+                    factors_device = self._device_gate_permutation_factors(factors)
+                    self._mps_monomial_kernels.permute_full_state_with_phase(
+                        self.state_vectors.reshape(-1),
+                        out_state.reshape(-1),
+                        self.n_qubits,
+                        dim,
+                        self.batch_size,
+                        perm_i32.reshape(-1),
+                        factors_device.reshape(-1),
+                    )
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+                return self
             perm = permutation if permutation.device == self.device else permutation.to(dtype=torch.int64, device=self.device)
             state = self.state_vectors[:, perm]
             factors = gate.permutation_factors
@@ -3776,6 +3878,29 @@ class BatchedQuantumSystem:
         if gate.diagonal is not None:
             targets = tuple(gate.targets)
             k = len(targets)
+            if self._mps_monomial_kernels is not None:
+                if k == 2:
+                    t0, t1 = targets
+                    if t0 > t1:
+                        t0, t1 = t1, t0
+                    sorted_targets = (t0, t1)
+                else:
+                    sorted_targets = targets
+                targets_i32 = self._device_targets_i32(sorted_targets)
+                dim = 1 << self.n_qubits
+                out_state = self._ensure_alt_state()
+                self._mps_monomial_kernels.diagonal_subset(
+                    self.state_vectors.reshape(-1),
+                    out_state.reshape(-1),
+                    self.n_qubits,
+                    dim,
+                    self.batch_size,
+                    targets_i32,
+                    k,
+                    buf.narrow(0, offset, 1 << k).reshape(-1),
+                )
+                self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+                return
             if k == 1:
                 target = targets[0]
                 a = 1 << target
