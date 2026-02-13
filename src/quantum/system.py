@@ -104,7 +104,6 @@ class _MonomialStreamSpec:
 
 
 _MONOMIAL_STREAM_ATTR = "_monomial_stream_spec"
-_INT32_MAX = np.iinfo(np.int32).max
 
 
 def _gate_monomial_stream_spec(gate: Gate) -> _MonomialStreamSpec | None:
@@ -1595,23 +1594,14 @@ def _sample_from_dynamic_dist(
     return _counts_from_register_codes(register_codes, n_bits=n_bits, num_shots=num_shots)
 
 
-def _requires_split_mps_state(*, n_qubits: int, device: torch.device) -> bool:
-    """Whether MPS complex64 state allocation exceeds the backend INT_MAX limit."""
-    if device.type != "mps":
-        return False
-    # MPS complex64 paths are constrained by underlying float element count.
-    return (1 << n_qubits) * 2 > _INT32_MAX
-
-
 def _can_use_split_static_executor(
     *,
     compiled: _DynamicCompiledGraph,
     n_qubits: int,
     device: torch.device,
 ) -> bool:
-    """Check if static execution can run with a split-MSB state layout."""
-    if not _requires_split_mps_state(n_qubits=n_qubits, device=device):
-        return False
+    """Check if static execution can run with split real/imag state layout."""
+    _ = (n_qubits, device)
     if compiled.node_count != 0:
         return False
 
@@ -1621,82 +1611,172 @@ def _can_use_split_static_executor(
         for gate in step.gates:
             if _gate_monomial_stream_spec(gate) is not None:
                 return False
-            if len(gate.targets) not in (1, 2):
+            if gate.diagonal is None and gate.permutation is None and len(gate.targets) not in (1, 2):
                 return False
     return True
 
 
-def _shift_gate_targets_for_split(gate: Gate) -> Gate:
-    """Create a shallow target-shifted gate clone for split-MSB execution."""
-    shifted = object.__new__(Gate)
-    shifted._tensor = gate._tensor
-    shifted._diagonal = gate._diagonal
-    shifted._permutation = gate._permutation
-    shifted._permutation_factors = gate._permutation_factors
-    shifted.targets = [target - 1 for target in gate.targets]
-    return shifted
-
-
-def _apply_split_q0_single_dense(
+def _split_diagonal_subindex_for_targets(
     *,
-    low_state: torch.Tensor,
-    high_state: torch.Tensor,
-    mat2: np.ndarray,
-    out_low: torch.Tensor,
-    out_high: torch.Tensor,
-) -> None:
-    """Apply a 1q gate on split qubit q0 across two half-state tensors."""
-    g00 = complex(mat2[0, 0])
-    g01 = complex(mat2[0, 1])
-    g10 = complex(mat2[1, 0])
-    g11 = complex(mat2[1, 1])
-    torch.mul(low_state, g00, out=out_low)
-    out_low.add_(high_state, alpha=g01)
-    torch.mul(low_state, g10, out=out_high)
-    out_high.add_(high_state, alpha=g11)
+    n_qubits: int,
+    indices: torch.Tensor,
+    targets: tuple[int, ...],
+    cache: dict[tuple[int, ...], torch.Tensor],
+) -> torch.Tensor:
+    """Build the k-qubit subindex lookup for a target subset."""
+    cached = cache.get(targets)
+    if cached is not None:
+        return cached
+
+    k = len(targets)
+    subindex = torch.zeros_like(indices)
+    for out_pos, target in enumerate(targets):
+        bitpos = n_qubits - 1 - target
+        bit = (indices >> bitpos) & 1
+        subindex = subindex | (bit << (k - out_pos - 1))
+
+    cache[targets] = subindex
+    return subindex
 
 
-def _apply_split_q0_two_dense(
+def _split_source_indices_for_targets(
     *,
-    low_state: torch.Tensor,
-    high_state: torch.Tensor,
-    other_target: int,
-    n_split_qubits: int,
-    mat4: np.ndarray,
-    out_low: torch.Tensor,
-    out_high: torch.Tensor,
+    n_qubits: int,
+    indices: torch.Tensor,
+    targets: tuple[int, ...],
+    permutation: torch.Tensor,
+    subindex_cache: dict[tuple[int, ...], torch.Tensor],
+    source_cache: dict[tuple[tuple[int, ...], int], torch.Tensor],
+) -> torch.Tensor:
+    """Build basis-index remap for subset permutation gates."""
+    key = (targets, id(permutation))
+    cached = source_cache.get(key)
+    if cached is not None:
+        return cached
+
+    subindex = _split_diagonal_subindex_for_targets(
+        n_qubits=n_qubits,
+        indices=indices,
+        targets=targets,
+        cache=subindex_cache,
+    )
+    source_subindex = permutation[subindex]
+
+    target_mask = 0
+    for target in targets:
+        target_mask |= 1 << (n_qubits - 1 - target)
+    clear_mask = (1 << n_qubits) - 1 - target_mask
+
+    source_indices = indices & clear_mask
+    k = len(targets)
+    for out_pos, target in enumerate(targets):
+        bitpos = n_qubits - 1 - target
+        bit = (source_subindex >> (k - out_pos - 1)) & 1
+        source_indices = source_indices | (bit << bitpos)
+
+    source_cache[key] = source_indices
+    return source_indices
+
+
+def _apply_split_reim_single_dense(
+    *,
+    state_re: torch.Tensor,
+    state_im: torch.Tensor,
+    out_re: torch.Tensor,
+    out_im: torch.Tensor,
+    n_qubits: int,
+    target: int,
+    coeffs: tuple[complex, complex, complex, complex],
 ) -> None:
-    """Apply a 2q gate on pair (q0, other_target) in split-MSB form."""
-    t = other_target - 1
-    a = 1 << t
-    b = 1 << (n_split_qubits - t - 1)
+    """Apply a 1q dense gate using split real/imag tensors."""
+    g00, g01, g10, g11 = coeffs
+    g00r, g00i = float(g00.real), float(g00.imag)
+    g01r, g01i = float(g01.real), float(g01.imag)
+    g10r, g10i = float(g10.real), float(g10.imag)
+    g11r, g11i = float(g11.real), float(g11.imag)
 
-    low = low_state.view(1, a, 2, b)
-    high = high_state.view(1, a, 2, b)
-    out_l = out_low.view(1, a, 2, b)
-    out_h = out_high.view(1, a, 2, b)
+    a = 1 << target
+    b = 1 << (n_qubits - target - 1)
+    re = state_re.view(1, a, 2, b)
+    im = state_im.view(1, a, 2, b)
+    out_r = out_re.view(1, a, 2, b)
+    out_i = out_im.view(1, a, 2, b)
 
-    l0 = low[:, :, 0, :]
-    l1 = low[:, :, 1, :]
-    h0 = high[:, :, 0, :]
-    h1 = high[:, :, 1, :]
+    s0r = re[:, :, 0, :]
+    s0i = im[:, :, 0, :]
+    s1r = re[:, :, 1, :]
+    s1i = im[:, :, 1, :]
 
-    r00 = complex(mat4[0, 0]); r01 = complex(mat4[0, 1]); r02 = complex(mat4[0, 2]); r03 = complex(mat4[0, 3])
-    r10 = complex(mat4[1, 0]); r11 = complex(mat4[1, 1]); r12 = complex(mat4[1, 2]); r13 = complex(mat4[1, 3])
-    r20 = complex(mat4[2, 0]); r21 = complex(mat4[2, 1]); r22 = complex(mat4[2, 2]); r23 = complex(mat4[2, 3])
-    r30 = complex(mat4[3, 0]); r31 = complex(mat4[3, 1]); r32 = complex(mat4[3, 2]); r33 = complex(mat4[3, 3])
+    # out0 = g00*s0 + g01*s1
+    torch.mul(s0r, g00r, out=out_r[:, :, 0, :])
+    out_r[:, :, 0, :].add_(s0i, alpha=-g00i).add_(s1r, alpha=g01r).add_(s1i, alpha=-g01i)
+    torch.mul(s0i, g00r, out=out_i[:, :, 0, :])
+    out_i[:, :, 0, :].add_(s0r, alpha=g00i).add_(s1i, alpha=g01r).add_(s1r, alpha=g01i)
 
-    torch.mul(l0, r00, out=out_l[:, :, 0, :])
-    out_l[:, :, 0, :].add_(l1, alpha=r01).add_(h0, alpha=r02).add_(h1, alpha=r03)
+    # out1 = g10*s0 + g11*s1
+    torch.mul(s0r, g10r, out=out_r[:, :, 1, :])
+    out_r[:, :, 1, :].add_(s0i, alpha=-g10i).add_(s1r, alpha=g11r).add_(s1i, alpha=-g11i)
+    torch.mul(s0i, g10r, out=out_i[:, :, 1, :])
+    out_i[:, :, 1, :].add_(s0r, alpha=g10i).add_(s1i, alpha=g11r).add_(s1r, alpha=g11i)
 
-    torch.mul(l0, r10, out=out_l[:, :, 1, :])
-    out_l[:, :, 1, :].add_(l1, alpha=r11).add_(h0, alpha=r12).add_(h1, alpha=r13)
 
-    torch.mul(l0, r20, out=out_h[:, :, 0, :])
-    out_h[:, :, 0, :].add_(l1, alpha=r21).add_(h0, alpha=r22).add_(h1, alpha=r23)
+def _apply_split_reim_two_dense(
+    *,
+    state_re: torch.Tensor,
+    state_im: torch.Tensor,
+    out_re: torch.Tensor,
+    out_im: torch.Tensor,
+    n_qubits: int,
+    targets: tuple[int, int],
+    rows: tuple[tuple[complex, complex, complex, complex], ...],
+) -> None:
+    """Apply a 2q dense gate using split real/imag tensors."""
+    t0, t1 = targets
+    a = 1 << t0
+    b = 1 << (t1 - t0 - 1)
+    c = 1 << (n_qubits - t1 - 1)
 
-    torch.mul(l0, r30, out=out_h[:, :, 1, :])
-    out_h[:, :, 1, :].add_(l1, alpha=r31).add_(h0, alpha=r32).add_(h1, alpha=r33)
+    re = state_re.view(1, a, 2, b, 2, c)
+    im = state_im.view(1, a, 2, b, 2, c)
+    out_r = out_re.view(1, a, 2, b, 2, c)
+    out_i = out_im.view(1, a, 2, b, 2, c)
+
+    s00r = re[:, :, 0, :, 0, :]
+    s00i = im[:, :, 0, :, 0, :]
+    s01r = re[:, :, 0, :, 1, :]
+    s01i = im[:, :, 0, :, 1, :]
+    s10r = re[:, :, 1, :, 0, :]
+    s10i = im[:, :, 1, :, 0, :]
+    s11r = re[:, :, 1, :, 1, :]
+    s11i = im[:, :, 1, :, 1, :]
+
+    out_slots = (
+        (out_r[:, :, 0, :, 0, :], out_i[:, :, 0, :, 0, :]),
+        (out_r[:, :, 0, :, 1, :], out_i[:, :, 0, :, 1, :]),
+        (out_r[:, :, 1, :, 0, :], out_i[:, :, 1, :, 0, :]),
+        (out_r[:, :, 1, :, 1, :], out_i[:, :, 1, :, 1, :]),
+    )
+    src_real = (s00r, s01r, s10r, s11r)
+    src_imag = (s00i, s01i, s10i, s11i)
+
+    for row_idx, (dst_r, dst_i) in enumerate(out_slots):
+        coeffs = rows[row_idx]
+        c0r, c0i = float(coeffs[0].real), float(coeffs[0].imag)
+        c1r, c1i = float(coeffs[1].real), float(coeffs[1].imag)
+        c2r, c2i = float(coeffs[2].real), float(coeffs[2].imag)
+        c3r, c3i = float(coeffs[3].real), float(coeffs[3].imag)
+
+        torch.mul(src_real[0], c0r, out=dst_r)
+        dst_r.add_(src_imag[0], alpha=-c0i)
+        dst_r.add_(src_real[1], alpha=c1r).add_(src_imag[1], alpha=-c1i)
+        dst_r.add_(src_real[2], alpha=c2r).add_(src_imag[2], alpha=-c2i)
+        dst_r.add_(src_real[3], alpha=c3r).add_(src_imag[3], alpha=-c3i)
+
+        torch.mul(src_imag[0], c0r, out=dst_i)
+        dst_i.add_(src_real[0], alpha=c0i)
+        dst_i.add_(src_imag[1], alpha=c1r).add_(src_real[1], alpha=c1i)
+        dst_i.add_(src_imag[2], alpha=c2r).add_(src_real[2], alpha=c2i)
+        dst_i.add_(src_imag[3], alpha=c3r).add_(src_real[3], alpha=c3i)
 
 
 def _register_codes_from_basis_samples(
@@ -1738,7 +1818,7 @@ def _sample_from_split_static_cdfs(
     n_qubits: int,
     n_bits: int,
 ) -> dict[str, int]:
-    """Sample static terminal outcomes from split-MSB per-half CDFs."""
+    """Sample static terminal outcomes from per-half CDFs."""
     if num_shots == 0:
         return {}
     if n_bits == 0:
@@ -1795,28 +1875,31 @@ def _run_split_static_simulation(
     n_bits: int,
     device: torch.device,
 ) -> tuple[dict[str, int], tuple[torch.Tensor | None, torch.Tensor | None, float]]:
-    """Execute static circuits with split-MSB state layout for large MPS sizes."""
-    if n_qubits < 2:
-        raise RuntimeError("Split static execution requires at least 2 qubits")
+    """Execute static circuits with split real/imag state layout."""
+    dim = 1 << n_qubits
+    half_dim = 1 << max(n_qubits - 1, 0)
 
-    n_split = n_qubits - 1
-    half_dim = 1 << n_split
+    state_re = torch.zeros((1, dim), dtype=torch.float32, device=device)
+    state_im = torch.zeros((1, dim), dtype=torch.float32, device=device)
+    state_re[:, 0] = 1.0
+    out_re = torch.empty_like(state_re)
+    out_im = torch.empty_like(state_im)
 
-    low_system = BatchedQuantumSystem(
-        n_qubits=n_split,
-        n_bits=0,
-        batch_size=1,
-        device=device,
-    )
-    high_system = BatchedQuantumSystem(
-        n_qubits=n_split,
-        n_bits=0,
-        batch_size=1,
-        device=device,
-    )
-    high_system.state_vectors.zero_()
+    dense_single_cache: dict[int, tuple[complex, complex, complex, complex]] = {}
+    dense_two_cache: dict[int, tuple[tuple[complex, complex, complex, complex], ...]] = {}
+    diagonal_scalar_cache: dict[int, tuple[complex, ...]] = {}
+    diagonal_coeff_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    permutation_cache: dict[int, torch.Tensor] = {}
+    permutation_factor_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    subset_subindex_cache: dict[tuple[int, ...], torch.Tensor] = {}
+    permutation_source_cache: dict[tuple[tuple[int, ...], int], torch.Tensor] = {}
+    full_indices: torch.Tensor | None = None
 
-    shifted_gate_cache: dict[int, Gate] = {}
+    def _full_indices() -> torch.Tensor:
+        nonlocal full_indices
+        if full_indices is None:
+            full_indices = torch.arange(dim, dtype=torch.int64, device=device)
+        return full_indices
 
     for step in compiled.steps:
         if not isinstance(step, _DynamicSegmentStep):
@@ -1827,48 +1910,311 @@ def _run_split_static_simulation(
                 raise RuntimeError("Split static executor does not support monomial stream pseudo-gates")
 
             targets = tuple(gate.targets)
-            if len(targets) not in (1, 2):
-                raise RuntimeError(f"Unsupported gate arity in split static executor: {len(targets)}")
+            k = len(targets)
 
-            if 0 not in targets:
-                shifted = shifted_gate_cache.get(id(gate))
-                if shifted is None:
-                    shifted = _shift_gate_targets_for_split(gate)
-                    shifted_gate_cache[id(gate)] = shifted
-                _ = low_system.apply_gate(shifted)
-                _ = high_system.apply_gate(shifted)
+            if gate.diagonal is not None:
+                diag = gate.diagonal
+                if k <= 2:
+                    scalars = diagonal_scalar_cache.get(id(diag))
+                    if scalars is None:
+                        vals = diag.detach().cpu().numpy().astype(np.complex64, copy=False)
+                        scalars = tuple(complex(v) for v in vals.tolist())
+                        diagonal_scalar_cache[id(diag)] = scalars
+
+                    if k == 1:
+                        d0r, d0i = float(scalars[0].real), float(scalars[0].imag)
+                        d1r, d1i = float(scalars[1].real), float(scalars[1].imag)
+                        target = targets[0]
+                        a = 1 << target
+                        b = 1 << (n_qubits - target - 1)
+                        re = state_re.view(1, a, 2, b)
+                        im = state_im.view(1, a, 2, b)
+                        out_r = out_re.view(1, a, 2, b)
+                        out_i = out_im.view(1, a, 2, b)
+
+                        torch.mul(re[:, :, 0, :], d0r, out=out_r[:, :, 0, :])
+                        out_r[:, :, 0, :].add_(im[:, :, 0, :], alpha=-d0i)
+                        torch.mul(im[:, :, 0, :], d0r, out=out_i[:, :, 0, :])
+                        out_i[:, :, 0, :].add_(re[:, :, 0, :], alpha=d0i)
+
+                        torch.mul(re[:, :, 1, :], d1r, out=out_r[:, :, 1, :])
+                        out_r[:, :, 1, :].add_(im[:, :, 1, :], alpha=-d1i)
+                        torch.mul(im[:, :, 1, :], d1r, out=out_i[:, :, 1, :])
+                        out_i[:, :, 1, :].add_(re[:, :, 1, :], alpha=d1i)
+                    else:
+                        t0, t1 = targets
+                        d = list(scalars[:4])
+                        if t0 > t1:
+                            t0, t1 = t1, t0
+                            d[1], d[2] = d[2], d[1]
+
+                        a = 1 << t0
+                        b = 1 << (t1 - t0 - 1)
+                        c = 1 << (n_qubits - t1 - 1)
+                        re = state_re.view(1, a, 2, b, 2, c)
+                        im = state_im.view(1, a, 2, b, 2, c)
+                        out_r = out_re.view(1, a, 2, b, 2, c)
+                        out_i = out_im.view(1, a, 2, b, 2, c)
+
+                        d0r, d0i = float(d[0].real), float(d[0].imag)
+                        d1r, d1i = float(d[1].real), float(d[1].imag)
+                        d2r, d2i = float(d[2].real), float(d[2].imag)
+                        d3r, d3i = float(d[3].real), float(d[3].imag)
+
+                        torch.mul(re[:, :, 0, :, 0, :], d0r, out=out_r[:, :, 0, :, 0, :])
+                        out_r[:, :, 0, :, 0, :].add_(im[:, :, 0, :, 0, :], alpha=-d0i)
+                        torch.mul(im[:, :, 0, :, 0, :], d0r, out=out_i[:, :, 0, :, 0, :])
+                        out_i[:, :, 0, :, 0, :].add_(re[:, :, 0, :, 0, :], alpha=d0i)
+
+                        torch.mul(re[:, :, 0, :, 1, :], d1r, out=out_r[:, :, 0, :, 1, :])
+                        out_r[:, :, 0, :, 1, :].add_(im[:, :, 0, :, 1, :], alpha=-d1i)
+                        torch.mul(im[:, :, 0, :, 1, :], d1r, out=out_i[:, :, 0, :, 1, :])
+                        out_i[:, :, 0, :, 1, :].add_(re[:, :, 0, :, 1, :], alpha=d1i)
+
+                        torch.mul(re[:, :, 1, :, 0, :], d2r, out=out_r[:, :, 1, :, 0, :])
+                        out_r[:, :, 1, :, 0, :].add_(im[:, :, 1, :, 0, :], alpha=-d2i)
+                        torch.mul(im[:, :, 1, :, 0, :], d2r, out=out_i[:, :, 1, :, 0, :])
+                        out_i[:, :, 1, :, 0, :].add_(re[:, :, 1, :, 0, :], alpha=d2i)
+
+                        torch.mul(re[:, :, 1, :, 1, :], d3r, out=out_r[:, :, 1, :, 1, :])
+                        out_r[:, :, 1, :, 1, :].add_(im[:, :, 1, :, 1, :], alpha=-d3i)
+                        torch.mul(im[:, :, 1, :, 1, :], d3r, out=out_i[:, :, 1, :, 1, :])
+                        out_i[:, :, 1, :, 1, :].add_(re[:, :, 1, :, 1, :], alpha=d3i)
+                else:
+                    coeffs = diagonal_coeff_cache.get(id(diag))
+                    if coeffs is None:
+                        diagonal_device = diag if diag.device == device else diag.to(device)
+                        coeffs = (
+                            diagonal_device.real.to(dtype=torch.float32),
+                            diagonal_device.imag.to(dtype=torch.float32),
+                        )
+                        diagonal_coeff_cache[id(diag)] = coeffs
+                    factors_re, factors_im = coeffs
+                    if k != n_qubits:
+                        subindex = _split_diagonal_subindex_for_targets(
+                            n_qubits=n_qubits,
+                            indices=_full_indices(),
+                            targets=targets,
+                            cache=subset_subindex_cache,
+                        )
+                        factors_re = factors_re[subindex]
+                        factors_im = factors_im[subindex]
+                    factors_re = factors_re.unsqueeze(0)
+                    factors_im = factors_im.unsqueeze(0)
+                    out_re.copy_(state_re)
+                    out_re.mul_(factors_re)
+                    out_re.addcmul_(state_im, factors_im, value=-1.0)
+                    out_im.copy_(state_im)
+                    out_im.mul_(factors_re)
+                    out_im.addcmul_(state_re, factors_im, value=1.0)
+
+                state_re, out_re = out_re, state_re
+                state_im, out_im = out_im, state_im
                 continue
 
-            out_low = low_system._ensure_alt_state()
-            out_high = high_system._ensure_alt_state()
+            if gate.permutation is not None:
+                permutation = gate.permutation
+                permutation_device = permutation_cache.get(id(permutation))
+                if permutation_device is None:
+                    permutation_device = permutation.to(dtype=torch.int64, device=device)
+                    permutation_cache[id(permutation)] = permutation_device
 
-            if len(targets) == 1:
-                mat2 = _gate_to_np_matrix(gate, 2)
-                _apply_split_q0_single_dense(
-                    low_state=low_system.state_vectors,
-                    high_state=high_system.state_vectors,
-                    mat2=mat2,
-                    out_low=out_low,
-                    out_high=out_high,
+                if k == 1:
+                    perm_np = permutation.detach().cpu().numpy().astype(np.int64, copy=False)
+                    p0, p1 = int(perm_np[0]), int(perm_np[1])
+                    target = targets[0]
+                    a = 1 << target
+                    b = 1 << (n_qubits - target - 1)
+                    re = state_re.view(1, a, 2, b)
+                    im = state_im.view(1, a, 2, b)
+                    out_r = out_re.view(1, a, 2, b)
+                    out_i = out_im.view(1, a, 2, b)
+                    out_r[:, :, 0, :].copy_(re[:, :, p0, :])
+                    out_i[:, :, 0, :].copy_(im[:, :, p0, :])
+                    out_r[:, :, 1, :].copy_(re[:, :, p1, :])
+                    out_i[:, :, 1, :].copy_(im[:, :, p1, :])
+                    factors = gate.permutation_factors
+                    if factors is not None:
+                        factors_np = factors.detach().cpu().numpy().astype(np.complex64, copy=False)
+                        f0 = complex(factors_np[0])
+                        f1 = complex(factors_np[1])
+                        f0r, f0i = float(f0.real), float(f0.imag)
+                        f1r, f1i = float(f1.real), float(f1.imag)
+                        scratch = state_re.view(1, a, 2, b)
+                        ss0 = scratch[:, :, 0, :]
+                        ss1 = scratch[:, :, 1, :]
+                        sr0 = out_r[:, :, 0, :]
+                        si0 = out_i[:, :, 0, :]
+                        sr1 = out_r[:, :, 1, :]
+                        si1 = out_i[:, :, 1, :]
+
+                        ss0.copy_(sr0)
+                        sr0.mul_(f0r)
+                        sr0.add_(si0, alpha=-f0i)
+                        si0.mul_(f0r)
+                        si0.add_(ss0, alpha=f0i)
+
+                        ss1.copy_(sr1)
+                        sr1.mul_(f1r)
+                        sr1.add_(si1, alpha=-f1i)
+                        si1.mul_(f1r)
+                        si1.add_(ss1, alpha=f1i)
+                elif k == 2:
+                    perm_np = permutation.detach().cpu().numpy().astype(np.int64, copy=False)
+                    factors = gate.permutation_factors
+                    factors_np = None
+                    if factors is not None:
+                        factors_np = factors.detach().cpu().numpy().astype(np.complex64, copy=False)
+                    t0, t1 = targets
+                    if t0 > t1:
+                        swap = np.array([0, 2, 1, 3], dtype=np.int64)
+                        perm_np = swap[perm_np[swap]]
+                        if factors_np is not None:
+                            factors_np = factors_np[swap]
+                        t0, t1 = t1, t0
+                    a = 1 << t0
+                    b = 1 << (t1 - t0 - 1)
+                    c = 1 << (n_qubits - t1 - 1)
+                    re = state_re.view(1, a, 2, b, 2, c)
+                    im = state_im.view(1, a, 2, b, 2, c)
+                    out_r = out_re.view(1, a, 2, b, 2, c)
+                    out_i = out_im.view(1, a, 2, b, 2, c)
+                    scratch = state_re.view(1, a, 2, b, 2, c)
+
+                    for out_idx in range(4):
+                        src_idx = int(perm_np[out_idx])
+                        o0 = (out_idx >> 1) & 1
+                        o1 = out_idx & 1
+                        s0 = (src_idx >> 1) & 1
+                        s1 = src_idx & 1
+                        out_r[:, :, o0, :, o1, :].copy_(re[:, :, s0, :, s1, :])
+                        out_i[:, :, o0, :, o1, :].copy_(im[:, :, s0, :, s1, :])
+
+                    if factors_np is not None:
+                        for out_idx in range(4):
+                            coeff = complex(factors_np[out_idx])
+                            cr, ci = float(coeff.real), float(coeff.imag)
+                            o0 = (out_idx >> 1) & 1
+                            o1 = out_idx & 1
+                            sr = out_r[:, :, o0, :, o1, :]
+                            si = out_i[:, :, o0, :, o1, :]
+                            ss = scratch[:, :, o0, :, o1, :]
+                            ss.copy_(sr)
+                            sr.mul_(cr)
+                            sr.add_(si, alpha=-ci)
+                            si.mul_(cr)
+                            si.add_(ss, alpha=ci)
+                elif k == n_qubits:
+                    source_indices = permutation_device
+                    out_re.copy_(state_re[:, source_indices])
+                    out_im.copy_(state_im[:, source_indices])
+                else:
+                    source_indices = _split_source_indices_for_targets(
+                        n_qubits=n_qubits,
+                        indices=_full_indices(),
+                        targets=targets,
+                        permutation=permutation_device,
+                        subindex_cache=subset_subindex_cache,
+                        source_cache=permutation_source_cache,
+                    )
+                    out_re.copy_(state_re[:, source_indices])
+                    out_im.copy_(state_im[:, source_indices])
+
+                factors = gate.permutation_factors
+                if factors is not None and k > 2:
+                    cached_factors = permutation_factor_cache.get(id(factors))
+                    if cached_factors is None:
+                        factors_device = factors if factors.device == device else factors.to(device)
+                        cached_factors = (
+                            factors_device.real.to(dtype=torch.float32),
+                            factors_device.imag.to(dtype=torch.float32),
+                        )
+                        permutation_factor_cache[id(factors)] = cached_factors
+                    factors_re, factors_im = cached_factors
+                    if k != n_qubits:
+                        subindex = _split_diagonal_subindex_for_targets(
+                            n_qubits=n_qubits,
+                            indices=_full_indices(),
+                            targets=targets,
+                            cache=subset_subindex_cache,
+                        )
+                        factors_re = factors_re[subindex]
+                        factors_im = factors_im[subindex]
+                    factors_re = factors_re.unsqueeze(0)
+                    factors_im = factors_im.unsqueeze(0)
+
+                    # Use current input buffer as scratch to avoid allocating clones.
+                    state_re.copy_(out_re)
+                    out_re.mul_(factors_re)
+                    out_re.addcmul_(out_im, factors_im, value=-1.0)
+                    out_im.mul_(factors_re)
+                    out_im.addcmul_(state_re, factors_im, value=1.0)
+
+                state_re, out_re = out_re, state_re
+                state_im, out_im = out_im, state_im
+                continue
+
+            if k == 1:
+                coeffs = dense_single_cache.get(id(gate))
+                if coeffs is None:
+                    mat2 = _gate_to_np_matrix(gate, 2)
+                    coeffs = (
+                        complex(mat2[0, 0]),
+                        complex(mat2[0, 1]),
+                        complex(mat2[1, 0]),
+                        complex(mat2[1, 1]),
+                    )
+                    dense_single_cache[id(gate)] = coeffs
+                _apply_split_reim_single_dense(
+                    state_re=state_re,
+                    state_im=state_im,
+                    out_re=out_re,
+                    out_im=out_im,
+                    n_qubits=n_qubits,
+                    target=targets[0],
+                    coeffs=coeffs,
                 )
-            else:
-                other_target = targets[0] if targets[1] == 0 else targets[1]
-                mat4 = _gate_matrix_on_ordered_pair(gate, 0, other_target)
-                _apply_split_q0_two_dense(
-                    low_state=low_system.state_vectors,
-                    high_state=high_system.state_vectors,
-                    other_target=other_target,
-                    n_split_qubits=n_split,
-                    mat4=mat4,
-                    out_low=out_low,
-                    out_high=out_high,
+                state_re, out_re = out_re, state_re
+                state_im, out_im = out_im, state_im
+                continue
+
+            if k == 2:
+                rows = dense_two_cache.get(id(gate))
+                if rows is None:
+                    mat4 = _gate_to_np_matrix(gate, 4)
+                    t0, t1 = targets
+                    if t0 > t1:
+                        perm = [0, 2, 1, 3]
+                        mat4 = mat4[np.ix_(perm, perm)]
+                    rows = tuple(
+                        tuple(complex(v) for v in mat4[r].tolist())
+                        for r in range(4)
+                    )
+                    dense_two_cache[id(gate)] = rows
+                ordered_targets = targets if targets[0] <= targets[1] else (targets[1], targets[0])
+                _apply_split_reim_two_dense(
+                    state_re=state_re,
+                    state_im=state_im,
+                    out_re=out_re,
+                    out_im=out_im,
+                    n_qubits=n_qubits,
+                    targets=ordered_targets,
+                    rows=rows,
                 )
+                state_re, out_re = out_re, state_re
+                state_im, out_im = out_im, state_im
+                continue
 
-            low_system.state_vectors, low_system._alt_state = low_system._alt_state, low_system.state_vectors
-            high_system.state_vectors, high_system._alt_state = high_system._alt_state, high_system.state_vectors
+            raise RuntimeError(f"Unsupported gate arity in split static executor: {k}")
 
-    probs_low = (torch.abs(low_system.state_vectors[0]) ** 2)
-    probs_high = (torch.abs(high_system.state_vectors[0]) ** 2)
+    state_re_1d = state_re[0]
+    state_im_1d = state_im[0]
+    if n_qubits == 0:
+        probs_low = (state_re_1d * state_re_1d + state_im_1d * state_im_1d)
+        probs_high = torch.empty(0, dtype=probs_low.dtype, device=probs_low.device)
+    else:
+        probs_low = (state_re_1d[:half_dim] * state_re_1d[:half_dim]) + (state_im_1d[:half_dim] * state_im_1d[:half_dim])
+        probs_high = (state_re_1d[half_dim:] * state_re_1d[half_dim:]) + (state_im_1d[half_dim:] * state_im_1d[half_dim:])
     if probs_low.device.type != "cpu":
         probs_low = probs_low.to("cpu")
     if probs_high.device.type != "cpu":
@@ -2318,7 +2664,7 @@ def _run_compiled_simulation(
                 codes=codes, cdf=sparse_cdf, num_shots=num_shots, n_bits=n_bits,
             )
 
-        # Fast path: cached split-MSB CDFs for large static MPS circuits.
+        # Fast path: cached split real/imag static CDFs.
         if use_split_static_executor and cached.cached_split_static_cdf is not None:
             cdf_low, cdf_high, p_low_total = cached.cached_split_static_cdf
             return _sample_from_split_static_cdfs(
