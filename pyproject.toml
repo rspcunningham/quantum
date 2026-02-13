@@ -1,6 +1,9 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.13",
+]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "quantum"
@@ -20,9 +23,17 @@ dependencies = [
 [project.scripts]
 bench = "benchmarks.run:main"
 bench-trace = "benchmarks.trace:main"
+bench-heatmap = "benchmarks.heatmap:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/quantum", "benchmarks"]
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.27"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/quantum", "benchmarks"]
+wheel.py-api = "cp313"
+
+[tool.scikit-build.cmake.define]
+CMAKE_OSX_DEPLOYMENT_TARGET = "13.0"
 
 [tool.basedpyright]
 reportUnknownMemberType = false

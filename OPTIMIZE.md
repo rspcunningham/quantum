@@ -115,17 +115,24 @@ After each optimization iteration, update the artifacts that drive decisions:
 
 **a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metrics, verdict. The result metrics are cold @1K total and warm @10K total for complete cases.
 
-**b) Native vs Aer comparison graphic** — generate `docs/native-vs-aer.png` with one-off, ephemeral analysis code:
-1. Use the latest native JSONL and the pinned Aer reference JSONL (`benchmarks/results/aer-reference.jsonl`).
-2. Single heatmap figure (landscape, ~16:9):
-   - **X-axis**: test circuits (sorted by qubit count, no tick labels, labeled "test circuit").
-   - **Y-axis**: shot counts (cold @1K, warm @10K).
-   - **Color**: `log2(aer_time / native_time)` with a diverging scale (green = native faster, red = Aer faster).
-   - **Title**: overall geometric mean ratio.
-3. Read the image after generation and verify it renders correctly.
-4. Only refresh the pinned Aer JSONL in a separate maintenance pass (e.g., benchmark suite/harness/environment change), not in normal optimization iterations.
-
-Do not commit helper scripts for this. Keep the analysis ephemeral and data-driven.
+**b) Native vs Aer comparison graphic** — generate `docs/native-vs-aer.png` with the committed tool:
+1. Run:
+   - `uv run bench-heatmap`
+2. Optional explicit inputs:
+   - `uv run bench-heatmap --native benchmarks/results/<native>.jsonl --reference benchmarks/results/aer-reference.jsonl --output docs/native-vs-aer.png --timeout 30`
+3. The generator enforces comparison policy:
+   - **Always include all test cases** (full case union plus expected-case coverage).
+   - **Any aborted/missing cell and any runtime >= timeout** is treated as a fail and plotted at timeout (`30s` by default), for both backends.
+   - Plot type is a **single timeout-parity scatter**:
+     - x = Aer runtime, y = native runtime, log-log axes.
+     - parity line `y=x`.
+     - timeout boundaries at `x=30`, `y=30`.
+   - Marker semantics:
+     - color = qubit bucket (`<=8`, `9-16`, `17-24`, `25-30+`),
+     - shape = status (`both complete`, `native fail`, `Aer fail`, `both fail`),
+     - size = shot row (cold @1K vs warm @10K).
+4. Read the generated image and confirm it renders correctly.
+5. Only refresh the pinned Aer JSONL in a separate maintenance pass (e.g., benchmark suite/harness/environment change), not during normal optimization iterations.
 
 **c) Progress chart** — `docs/progress-data.md` tracks cold and warm totals across optimization checkpoints.
 

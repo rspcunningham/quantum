@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 import math
+import struct
+import numpy as np
 from collections.abc import Iterator, Sequence
 from typing import Callable, cast, overload, override
 
@@ -119,12 +121,28 @@ def registers(*sizes: int) -> tuple[QuantumRegister, ...]:
     return tuple(regs)
 
 
+_PACKED_STATIC_MAGIC = 0x31505351
+_PACKED_STATIC_VERSION = 1
+
+
 class Gate:
     _tensor: torch.Tensor | None
     _diagonal: torch.Tensor | None
     _permutation: torch.Tensor | None
     _permutation_factors: torch.Tensor | None
     targets: list[int]
+    _canonical_kind: int
+    _canonical_targets: tuple[int, ...]
+    _canonical_coeff_re: tuple[float, ...]
+    _canonical_coeff_im: tuple[float, ...]
+    _canonical_perm: tuple[int, ...]
+    _canonical_aux_re: tuple[float, ...]
+    _canonical_aux_im: tuple[float, ...]
+    _native_targets_i32: np.ndarray
+    _native_coeff_c64: np.ndarray
+    _native_perm_i32: np.ndarray
+    _native_aux_c64: np.ndarray
+    _native_epoch: int
 
     def __init__(
         self,
@@ -185,6 +203,51 @@ class Gate:
         self._permutation = permutation
         self._permutation_factors = permutation_factors
         self.targets = list(targets)
+        self._refresh_canonical_cache()
+
+    def _refresh_canonical_cache(self) -> None:
+        self._native_epoch = int(getattr(self, "_native_epoch", 0)) + 1
+        self._canonical_targets = tuple(int(t) for t in self.targets)
+        self._canonical_coeff_re = ()
+        self._canonical_coeff_im = ()
+        self._canonical_perm = ()
+        self._canonical_aux_re = ()
+        self._canonical_aux_im = ()
+        self._native_targets_i32 = np.asarray(self.targets, dtype=np.int32)
+        self._native_coeff_c64 = np.empty(0, dtype=np.complex64)
+        self._native_perm_i32 = np.empty(0, dtype=np.int32)
+        self._native_aux_c64 = np.empty(0, dtype=np.complex64)
+
+        if self._diagonal is not None:
+            diag = self._diagonal.reshape(-1)
+            if diag.device.type != "cpu":
+                diag = diag.to("cpu")
+            diag_np = diag.to(dtype=torch.complex64).contiguous().numpy()
+            self._canonical_kind = 1
+            self._native_coeff_c64 = np.array(diag_np, dtype=np.complex64, copy=True)
+            return
+
+        if self._permutation is not None:
+            perm = self._permutation.reshape(-1)
+            if perm.device.type != "cpu":
+                perm = perm.to("cpu")
+            perm_np = perm.to(dtype=torch.int32).contiguous().numpy()
+            self._canonical_kind = 2
+            self._native_perm_i32 = np.array(perm_np, dtype=np.int32, copy=True)
+            if self._permutation_factors is not None:
+                factors = self._permutation_factors.reshape(-1)
+                if factors.device.type != "cpu":
+                    factors = factors.to("cpu")
+                factors_np = factors.to(dtype=torch.complex64).contiguous().numpy()
+                self._native_aux_c64 = np.array(factors_np, dtype=np.complex64, copy=True)
+            return
+
+        dense = self.tensor.reshape(-1)
+        if dense.device.type != "cpu":
+            dense = dense.to("cpu")
+        dense_np = dense.to(dtype=torch.complex64).contiguous().numpy()
+        self._canonical_kind = 3
+        self._native_coeff_c64 = np.array(dense_np, dtype=np.complex64, copy=True)
 
     @property
     def tensor(self) -> torch.Tensor:
@@ -206,6 +269,7 @@ class Gate:
                 self._permutation = permutation
                 if not bool(torch.allclose(permutation_factors, torch.ones_like(permutation_factors))):
                     self._permutation_factors = permutation_factors
+        self._refresh_canonical_cache()
 
     @property
     def diagonal(self) -> torch.Tensor | None:
@@ -520,9 +584,158 @@ class ConditionalGate:
 
 class Circuit:
     operations: list[Gate | ConditionalGate | Measurement | Circuit]
+    _native_static_payload: bytes | None
+    _native_static_payload_signature: tuple[object, ...] | None
 
     def __init__(self, operations: Sequence[Gate | ConditionalGate | Measurement | Circuit]):
         self.operations = list(operations)
+        self._native_static_payload = None
+        self._native_static_payload_signature = None
+
+    def _invalidate_native_static_payload(self) -> None:
+        self._native_static_payload = None
+        self._native_static_payload_signature = None
+
+    def append(self, operation: Gate | ConditionalGate | Measurement | Circuit) -> None:
+        self.operations.append(operation)
+        self._invalidate_native_static_payload()
+
+    def extend(self, operations: Sequence[Gate | ConditionalGate | Measurement | Circuit]) -> None:
+        self.operations.extend(operations)
+        self._invalidate_native_static_payload()
+
+    def _flatten_operations(self) -> list[Gate | ConditionalGate | Measurement]:
+        out: list[Gate | ConditionalGate | Measurement] = []
+
+        def _visit(op: Gate | ConditionalGate | Measurement | Circuit) -> None:
+            if isinstance(op, Circuit):
+                for child in op.operations:
+                    _visit(child)
+                return
+            out.append(op)
+
+        for op in self.operations:
+            _visit(op)
+        return out
+
+    def _native_static_signature(
+        self,
+        *,
+        n_qubits: int,
+        n_bits: int,
+        linear_ops: Sequence[Gate | ConditionalGate | Measurement],
+    ) -> tuple[object, ...]:
+        parts: list[object] = [int(n_qubits), int(n_bits), len(linear_ops)]
+        for op in linear_ops:
+            if isinstance(op, Gate):
+                parts.extend([
+                    "G",
+                    id(op),
+                    int(getattr(op, "_native_epoch", 0)),
+                    tuple(int(t) for t in op.targets),
+                    int(getattr(op, "_canonical_kind", 0)),
+                ])
+                continue
+            if isinstance(op, Measurement):
+                parts.extend(["M", int(op.qubit), int(op.bit)])
+                continue
+            if isinstance(op, ConditionalGate):
+                parts.extend([
+                    "C",
+                    int(op.condition),
+                    id(op.gate),
+                    int(getattr(op.gate, "_native_epoch", 0)),
+                ])
+                continue
+            parts.extend(["O", id(op)])
+        return tuple(parts)
+
+    def build_native_static_payload(self, *, n_qubits: int, n_bits: int) -> bytes:
+        linear_ops = self._flatten_operations()
+        signature = self._native_static_signature(
+            n_qubits=n_qubits,
+            n_bits=n_bits,
+            linear_ops=linear_ops,
+        )
+        if self._native_static_payload is not None and self._native_static_payload_signature == signature:
+            return self._native_static_payload
+
+        terminal_start = len(linear_ops)
+        while terminal_start > 0 and isinstance(linear_ops[terminal_start - 1], Measurement):
+            terminal_start -= 1
+
+        for idx in range(terminal_start):
+            op = linear_ops[idx]
+            if isinstance(op, (ConditionalGate, Measurement)) or not isinstance(op, Gate):
+                raise RuntimeError("Dynamic circuits are temporarily unsupported in static-only Metal build.")
+        for idx in range(terminal_start, len(linear_ops)):
+            if not isinstance(linear_ops[idx], Measurement):
+                raise RuntimeError("Dynamic circuits are temporarily unsupported in static-only Metal build.")
+
+        op_count = terminal_start
+        terminal_pair_count = len(linear_ops) - terminal_start
+
+        blob = bytearray()
+        blob.extend(struct.pack(
+            "<IIiiII",
+            _PACKED_STATIC_MAGIC,
+            _PACKED_STATIC_VERSION,
+            int(n_qubits),
+            int(n_bits),
+            int(op_count),
+            int(terminal_pair_count),
+        ))
+
+        for idx in range(op_count):
+            gate = linear_ops[idx]
+            assert isinstance(gate, Gate)
+
+            target_tuple = tuple(int(t) for t in gate.targets)
+            if target_tuple != tuple(getattr(gate, "_canonical_targets", ())):
+                gate._refresh_canonical_cache()
+
+            kind = int(getattr(gate, "_canonical_kind"))
+            targets = np.ascontiguousarray(np.asarray(getattr(gate, "_native_targets_i32"), dtype=np.int32))
+
+            if kind == 1 or kind == 3:
+                coeff = np.ascontiguousarray(np.asarray(getattr(gate, "_native_coeff_c64"), dtype=np.complex64))
+                blob.extend(struct.pack(
+                    "<iiii",
+                    kind,
+                    int(targets.size),
+                    int(coeff.size),
+                    0,
+                ))
+                blob.extend(targets.tobytes(order="C"))
+                blob.extend(coeff.tobytes(order="C"))
+                continue
+
+            if kind == 2:
+                perm = np.ascontiguousarray(np.asarray(getattr(gate, "_native_perm_i32"), dtype=np.int32))
+                aux = np.ascontiguousarray(np.asarray(getattr(gate, "_native_aux_c64"), dtype=np.complex64))
+                blob.extend(struct.pack(
+                    "<iiii",
+                    kind,
+                    int(targets.size),
+                    int(perm.size),
+                    int(aux.size),
+                ))
+                blob.extend(targets.tobytes(order="C"))
+                blob.extend(perm.tobytes(order="C"))
+                blob.extend(aux.tobytes(order="C"))
+                continue
+
+            raise RuntimeError(f"Unknown gate canonical kind in packed static ABI: {kind}")
+
+        for idx in range(terminal_start, len(linear_ops)):
+            measurement = linear_ops[idx]
+            assert isinstance(measurement, Measurement)
+            blob.extend(struct.pack("<ii", int(measurement.qubit), int(measurement.bit)))
+
+        payload = bytes(blob)
+        self._native_static_payload = payload
+        self._native_static_payload_signature = signature
+        return payload
 
     def inverse(self) -> Circuit:
         reversed_operations = self.operations[::-1]

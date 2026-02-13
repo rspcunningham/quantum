@@ -3118,6 +3118,214 @@ class _CompiledCircuitCache:
 _circuit_compilation_cache: dict[int, _CompiledCircuitCache] = {}
 
 
+@dataclass(slots=True)
+class _PreparedExecutionPlan:
+    """Compile-stage artifacts reused by multiple execution frontends."""
+
+    compiled: _DynamicCompiledGraph
+    initial_state_np: np.ndarray | None
+    segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]]
+    input_device_type: str
+    effective_device: torch.device
+    use_split_static_executor: bool
+
+
+def _compile_circuit_for_metal_program(
+    *,
+    circuit: Circuit,
+    n_qubits: int,
+    n_bits: int,
+    device: torch.device,
+    allow_cpu_fallback: bool = True,
+    allow_initial_state_precompute: bool = True,
+    cold_static_minimal_fusions: bool = False,
+) -> _PreparedExecutionPlan:
+    """Compile a circuit into execution-ready steps and metadata.
+
+    This helper performs compile-time graph transforms and cache precomputation
+    without executing shots. It is shared by run-time compilation and the
+    metal-program lowering path.
+    """
+    del n_bits  # reserved for future compile-time bit-register rewrites
+    input_device_type = device.type
+    compiled = _compile_execution_graph(circuit)
+    use_split_static_executor = _can_use_split_static_executor(
+        compiled=compiled,
+        n_qubits=n_qubits,
+        device=device,
+    )
+
+    # CPU avoids MPS kernel launch overhead (~170μs/gate) and item() sync
+    # costs (~108μs/call). Dynamic circuits benefit more due to item() savings;
+    # static circuits only win at small dims where kernel overhead dominates.
+    if allow_cpu_fallback and device.type != "cpu":
+        cpu_threshold = 14 if compiled.node_count > 0 else 12
+        if n_qubits <= cpu_threshold:
+            device = torch.device("cpu")
+
+    # Preprocess: cancel inverse pairs, then fuse gate sequences.
+    # Cheap local passes run broadly; expensive 2^n passes stay behind
+    # an amortization guard. For larger systems, block fusion replaces
+    # heavy diagonal/permutation materialization.
+    run_heavy_fusion = (
+        False if cold_static_minimal_fusions
+        else _should_run_heavy_compile_fusions(compiled, n_qubits=n_qubits)
+    )
+    use_block_fusion = (n_qubits >= 14) and (not cold_static_minimal_fusions)
+    fused_steps: list[_DynamicGraphStep] = []
+    any_changed = False
+    for step in compiled.steps:
+        if isinstance(step, _DynamicSegmentStep):
+            # Always cancel inverse pairs first (cheap, handles roundtrips)
+            fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
+            # Cheap diagonal-run fusion: collapse repeated 1q/2q diagonal
+            # gates (e.g. RZ/CZ layers) by target without 2^n materialization.
+            if n_qubits >= 12:
+                fused_gates = _fuse_segment_local_diagonals(fused_gates)
+            # Cheap 1q fusion helps primarily on large static states where
+            # per-gate MPS dispatch dominates. Keep it off for smaller
+            # workloads to avoid compile-time overhead/regressions.
+            if (not cold_static_minimal_fusions
+                    and compiled.node_count == 0
+                    and n_qubits >= 20):
+                # Exact dense-region fusion: collapse contiguous local
+                # 1q/2q blocks on one qubit pair into a single 4x4 gate.
+                fused_gates = _fuse_segment_dense_pair_regions(fused_gates)
+                fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
+                fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
+            if use_block_fusion:
+                fused_gates = _fuse_gates_into_blocks(fused_gates, n_qubits)
+            elif run_heavy_fusion:
+                fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
+                fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
+                fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
+            if fused_gates is not step.gates:
+                fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
+                any_changed = True
+            else:
+                fused_steps.append(step)
+        else:
+            fused_steps.append(step)
+    if any_changed:
+        compiled = _DynamicCompiledGraph(
+            steps=tuple(fused_steps),
+            node_count=compiled.node_count,
+            terminal_measurements=compiled.terminal_measurements,
+        )
+        if not cold_static_minimal_fusions:
+            # Pre-transfer fused tensors to device before main loop
+            for step in compiled.steps:
+                if isinstance(step, _DynamicSegmentStep):
+                    for gate in step.gates:
+                        if gate._diagonal is not None and len(gate.targets) == n_qubits:
+                            gate._diagonal = gate._diagonal.to(device)
+                        if gate._permutation is not None and len(gate.targets) == n_qubits:
+                            gate._permutation = gate._permutation.to(dtype=torch.int64, device=device)
+                            if gate._permutation_factors is not None:
+                                gate._permutation_factors = gate._permutation_factors.to(device)
+                        # Pre-transfer block unitary tensors to device
+                        if (gate._tensor is not None
+                                and len(gate.targets) > 2
+                                and gate._diagonal is None
+                                and gate._permutation is None):
+                            gate._tensor = gate._tensor.to(device)
+
+    # Re-check split-static support after fusion transforms; compile rewrites may
+    # increase local gate arity (e.g. dense block fusion).
+    use_split_static_executor = _can_use_split_static_executor(
+        compiled=compiled,
+        n_qubits=n_qubits,
+        device=device,
+    )
+
+    # Pre-compute initial state for leading 1q-only blocks on distinct qubits.
+    # For circuits starting with H_all or similar patterns, the resulting state
+    # is a separable tensor product computed analytically via numpy kron in
+    # O(2^n) time, avoiding N expensive MPS kernel dispatches.
+    initial_state_np: np.ndarray | None = None
+    if (allow_initial_state_precompute
+            and not use_split_static_executor
+            and compiled.steps
+            and isinstance(compiled.steps[0], _DynamicSegmentStep)):
+        initial_state_np, n_consumed = _precompute_initial_1q_block(
+            compiled.steps[0].gates, n_qubits
+        )
+        if initial_state_np is not None and n_consumed > 0:
+            remaining_gates = compiled.steps[0].gates[n_consumed:]
+            new_steps: list[_DynamicGraphStep] = []
+            if remaining_gates:
+                new_steps.append(_DynamicSegmentStep(gates=remaining_gates))
+            new_steps.extend(compiled.steps[1:])
+            compiled = _DynamicCompiledGraph(
+                steps=tuple(new_steps),
+                node_count=compiled.node_count,
+                terminal_measurements=compiled.terminal_measurements,
+            )
+
+    # Collapse long local-monomial runs into one MPS kernel launch.
+    # This targets large cold-start workloads where repeated full-state
+    # diagonal/permutation passes dominate runtime.
+    if cold_static_minimal_fusions:
+        enable_monomial_stream = os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
+    else:
+        enable_monomial_stream = (
+            device.type == "mps"
+            and os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
+            and (
+                not use_split_static_executor
+                or _mps_split_monomial_kernel_library() is not None
+            )
+        )
+    if enable_monomial_stream:
+        streamed_steps: list[_DynamicGraphStep] = []
+        stream_changed = False
+        for step in compiled.steps:
+            if isinstance(step, _DynamicSegmentStep):
+                streamed_gates = _fuse_segment_local_monomial_streams(step.gates)
+                if streamed_gates is not step.gates:
+                    streamed_steps.append(_DynamicSegmentStep(gates=streamed_gates))
+                    stream_changed = True
+                else:
+                    streamed_steps.append(step)
+                continue
+            if isinstance(step, _DynamicConditionalStep):
+                streamed_gates = _fuse_segment_local_monomial_streams(step.gates)
+                if streamed_gates is not step.gates:
+                    streamed_steps.append(_DynamicConditionalStep(condition=step.condition, gates=streamed_gates))
+                    stream_changed = True
+                else:
+                    streamed_steps.append(step)
+                continue
+            streamed_steps.append(step)
+        if stream_changed:
+            compiled = _DynamicCompiledGraph(
+                steps=tuple(streamed_steps),
+                node_count=compiled.node_count,
+                terminal_measurements=compiled.terminal_measurements,
+            )
+
+    # Pre-cache gate scalars per segment to eliminate per-gate copy_ overhead.
+    # On MPS, only beneficial at ≥17 qubits where per-gate scalar_tensor → copy_
+    # overhead is significant. At 13-16q, MPS buffer allocation cost exceeds savings.
+    segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]] = {}
+    cache_scalars = (not cold_static_minimal_fusions) and (device.type != "mps" or n_qubits >= 17)
+    if cache_scalars:
+        for i, step in enumerate(compiled.steps):
+            if isinstance(step, (_DynamicSegmentStep, _DynamicConditionalStep)):
+                cache = _compile_segment_scalars(step.gates, n_qubits, device)
+                if cache is not None:
+                    segment_scalar_caches[i] = cache
+
+    return _PreparedExecutionPlan(
+        compiled=compiled,
+        initial_state_np=initial_state_np,
+        segment_scalar_caches=segment_scalar_caches,
+        input_device_type=input_device_type,
+        effective_device=device,
+        use_split_static_executor=use_split_static_executor,
+    )
+
+
 @torch.inference_mode()
 def _run_compiled_simulation(
     *,
@@ -3193,162 +3401,23 @@ def _run_compiled_simulation(
                 codes=codes, cdf=cdf, num_shots=num_shots, n_bits=n_bits,
             )
     else:
-        input_device_type = device.type
-        compiled = _compile_execution_graph(circuit)
-        use_split_static_executor = _can_use_split_static_executor(
-            compiled=compiled,
+        prepared = _compile_circuit_for_metal_program(
+            circuit=circuit,
             n_qubits=n_qubits,
+            n_bits=n_bits,
             device=device,
         )
-
-        # CPU avoids MPS kernel launch overhead (~170μs/gate) and item() sync
-        # costs (~108μs/call). Dynamic circuits benefit more due to item() savings;
-        # static circuits only win at small dims where kernel overhead dominates.
-        if device.type != "cpu":
-            cpu_threshold = 14 if compiled.node_count > 0 else 12
-            if n_qubits <= cpu_threshold:
-                device = torch.device("cpu")
-
-        # Preprocess: cancel inverse pairs, then fuse gate sequences.
-        # Cheap local passes run broadly; expensive 2^n passes stay behind
-        # an amortization guard. For larger systems, block fusion replaces
-        # heavy diagonal/permutation materialization.
-        run_heavy_fusion = _should_run_heavy_compile_fusions(compiled, n_qubits=n_qubits)
-        _use_block_fusion = n_qubits >= 14
-        fused_steps = []
-        any_changed = False
-        for step in compiled.steps:
-            if isinstance(step, _DynamicSegmentStep):
-                # Always cancel inverse pairs first (cheap, handles roundtrips)
-                fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
-                # Cheap diagonal-run fusion: collapse repeated 1q/2q diagonal
-                # gates (e.g. RZ/CZ layers) by target without 2^n materialization.
-                if n_qubits >= 12:
-                    fused_gates = _fuse_segment_local_diagonals(fused_gates)
-                # Cheap 1q fusion helps primarily on large static states where
-                # per-gate MPS dispatch dominates. Keep it off for smaller
-                # workloads to avoid compile-time overhead/regressions.
-                if compiled.node_count == 0 and n_qubits >= 20:
-                    # Exact dense-region fusion: collapse contiguous local
-                    # 1q/2q blocks on one qubit pair into a single 4x4 gate.
-                    fused_gates = _fuse_segment_dense_pair_regions(fused_gates)
-                    fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
-                    fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
-                if _use_block_fusion:
-                    fused_gates = _fuse_gates_into_blocks(fused_gates, n_qubits)
-                elif run_heavy_fusion:
-                    fused_gates = _fuse_segment_diagonals(fused_gates, n_qubits)
-                    fused_gates = _fuse_segment_permutations(fused_gates, n_qubits)
-                    fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
-                if fused_gates is not step.gates:
-                    fused_steps.append(_DynamicSegmentStep(gates=fused_gates))
-                    any_changed = True
-                else:
-                    fused_steps.append(step)
-            else:
-                fused_steps.append(step)
-        if any_changed:
-            compiled = _DynamicCompiledGraph(
-                steps=tuple(fused_steps),
-                node_count=compiled.node_count,
-                terminal_measurements=compiled.terminal_measurements,
-            )
-            # Pre-transfer fused tensors to device before main loop
-            for step in compiled.steps:
-                if isinstance(step, _DynamicSegmentStep):
-                    for gate in step.gates:
-                        if gate._diagonal is not None and len(gate.targets) == n_qubits:
-                            gate._diagonal = gate._diagonal.to(device)
-                        if gate._permutation is not None and len(gate.targets) == n_qubits:
-                            gate._permutation = gate._permutation.to(dtype=torch.int64, device=device)
-                            if gate._permutation_factors is not None:
-                                gate._permutation_factors = gate._permutation_factors.to(device)
-                        # Pre-transfer block unitary tensors to device
-                        if (gate._tensor is not None
-                                and len(gate.targets) > 2
-                                and gate._diagonal is None
-                                and gate._permutation is None):
-                            gate._tensor = gate._tensor.to(device)
-
-        # Pre-compute initial state for leading 1q-only blocks on distinct qubits.
-        # For circuits starting with H_all or similar patterns, the resulting state
-        # is a separable tensor product computed analytically via numpy kron in
-        # O(2^n) time, avoiding N expensive MPS kernel dispatches.
-        initial_state_np: np.ndarray | None = None
-        if (not use_split_static_executor
-                and compiled.steps
-                and isinstance(compiled.steps[0], _DynamicSegmentStep)):
-            initial_state_np, n_consumed = _precompute_initial_1q_block(
-                compiled.steps[0].gates, n_qubits
-            )
-            if initial_state_np is not None and n_consumed > 0:
-                remaining_gates = compiled.steps[0].gates[n_consumed:]
-                new_steps: list[_DynamicGraphStep] = []
-                if remaining_gates:
-                    new_steps.append(_DynamicSegmentStep(gates=remaining_gates))
-                new_steps.extend(compiled.steps[1:])
-                compiled = _DynamicCompiledGraph(
-                    steps=tuple(new_steps),
-                    node_count=compiled.node_count,
-                    terminal_measurements=compiled.terminal_measurements,
-                )
-
-        # Collapse long local-monomial runs into one MPS kernel launch.
-        # This targets large cold-start workloads where repeated full-state
-        # diagonal/permutation passes dominate runtime.
-        enable_monomial_stream = (
-            device.type == "mps"
-            and os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
-            and (
-                not use_split_static_executor
-                or _mps_split_monomial_kernel_library() is not None
-            )
-        )
-        if enable_monomial_stream:
-            streamed_steps: list[_DynamicGraphStep] = []
-            stream_changed = False
-            for step in compiled.steps:
-                if isinstance(step, _DynamicSegmentStep):
-                    streamed_gates = _fuse_segment_local_monomial_streams(step.gates)
-                    if streamed_gates is not step.gates:
-                        streamed_steps.append(_DynamicSegmentStep(gates=streamed_gates))
-                        stream_changed = True
-                    else:
-                        streamed_steps.append(step)
-                    continue
-                if isinstance(step, _DynamicConditionalStep):
-                    streamed_gates = _fuse_segment_local_monomial_streams(step.gates)
-                    if streamed_gates is not step.gates:
-                        streamed_steps.append(_DynamicConditionalStep(condition=step.condition, gates=streamed_gates))
-                        stream_changed = True
-                    else:
-                        streamed_steps.append(step)
-                    continue
-                streamed_steps.append(step)
-            if stream_changed:
-                compiled = _DynamicCompiledGraph(
-                    steps=tuple(streamed_steps),
-                    node_count=compiled.node_count,
-                    terminal_measurements=compiled.terminal_measurements,
-                )
-
-        # Pre-cache gate scalars per segment to eliminate per-gate copy_ overhead.
-        # On MPS, only beneficial at ≥17 qubits where per-gate scalar_tensor → copy_
-        # overhead is significant. At 13-16q, MPS buffer allocation cost exceeds savings.
-        segment_scalar_caches: dict[int, tuple[torch.Tensor, tuple[int, ...], tuple[tuple[complex, ...], ...]]] = {}
-        _cache_scalars = device.type != "mps" or n_qubits >= 17
-        if _cache_scalars:
-            for i, step in enumerate(compiled.steps):
-                if isinstance(step, (_DynamicSegmentStep, _DynamicConditionalStep)):
-                    cache = _compile_segment_scalars(step.gates, n_qubits, device)
-                    if cache is not None:
-                        segment_scalar_caches[i] = cache
+        compiled = prepared.compiled
+        initial_state_np = prepared.initial_state_np
+        segment_scalar_caches = prepared.segment_scalar_caches
+        device = prepared.effective_device
+        use_split_static_executor = prepared.use_split_static_executor
 
         _circuit_compilation_cache[cache_key] = _CompiledCircuitCache(
             compiled=compiled,
             initial_state_np=initial_state_np,
             segment_scalar_caches=segment_scalar_caches,
-            input_device_type=input_device_type,
+            input_device_type=prepared.input_device_type,
             effective_device=device,
         )
 
@@ -4435,7 +4504,10 @@ def run_simulation(
     n_bits: int | None = None,
     device: torch.device | None = None,
 ) -> dict[str, int]:
-    """Run a quantum circuit simulation and return measurement counts."""
+    """Run a quantum circuit simulation and return measurement counts.
+
+    The runtime is metal-first and requires an MPS-capable device.
+    """
     if n_qubits is None or n_bits is None:
         inferred_qubits, inferred_bits = infer_resources(circuit)
         if n_qubits is None:
@@ -4444,20 +4516,20 @@ def run_simulation(
             n_bits = inferred_bits
 
     if device is None:
-        device = torch.device(
-            "mps"
-            if torch.backends.mps.is_available()
-            else "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
-        )
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("Metal runtime required; non-MPS backend unsupported in this build.")
+        device = torch.device("mps")
+    elif device.type != "mps":
+        raise RuntimeError("Metal runtime required; non-MPS backend unsupported in this build.")
 
-    return _run_compiled_simulation(
-        circuit=circuit,
-        num_shots=num_shots,
+    # Import locally to avoid module cycle during bootstrap.
+    from quantum.metal_exec import execute_static_circuit
+
+    return execute_static_circuit(
+        circuit,
         n_qubits=n_qubits,
         n_bits=n_bits,
-        device=device,
+        num_shots=num_shots,
     )
 
 
