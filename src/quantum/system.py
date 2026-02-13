@@ -445,6 +445,109 @@ def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gat
     return tuple(result)
 
 
+def _fuse_segment_local_diagonals(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
+    """Fuse contiguous runs of 1q/2q diagonal gates by target tuple.
+
+    Diagonal gates commute, so within a diagonal-only run we can multiply all
+    gates acting on the same qubit/pair and emit one fused gate per target.
+    This keeps compile cost O(num_gates) and avoids the 2^n full-state diagonal
+    materialization used by heavy fusion passes.
+    """
+    n = len(gates)
+    if n < 2:
+        return gates
+
+    has_local_diagonal_run = False
+    for i in range(n - 1):
+        g0 = gates[i]
+        g1 = gates[i + 1]
+        if (
+            g0.diagonal is not None
+            and g1.diagonal is not None
+            and len(g0.targets) <= 2
+            and len(g1.targets) <= 2
+        ):
+            has_local_diagonal_run = True
+            break
+    if not has_local_diagonal_run:
+        return gates
+
+    result: list[Gate] = []
+    i = 0
+    while i < n:
+        gate = gates[i]
+        if gate.diagonal is None or len(gate.targets) > 2:
+            result.append(gate)
+            i += 1
+            continue
+
+        j = i + 1
+        while (
+            j < n
+            and gates[j].diagonal is not None
+            and len(gates[j].targets) <= 2
+        ):
+            j += 1
+
+        if j - i < 2:
+            result.append(gate)
+            i = j
+            continue
+
+        oneq_order: list[int] = []
+        twoq_order: list[tuple[int, int]] = []
+        oneq_fused: dict[int, np.ndarray] = {}
+        twoq_fused: dict[tuple[int, int], np.ndarray] = {}
+
+        for k in range(i, j):
+            dg = gates[k].diagonal
+            assert dg is not None
+            targets = tuple(gates[k].targets)
+            if len(targets) == 1:
+                q = targets[0]
+                vals = dg.detach().cpu().numpy().astype(np.complex64, copy=False)
+                if q not in oneq_fused:
+                    oneq_order.append(q)
+                    oneq_fused[q] = vals.copy()
+                else:
+                    oneq_fused[q] *= vals
+                continue
+
+            t0, t1 = targets
+            vals2 = dg.detach().cpu().numpy().astype(np.complex64, copy=False)
+            if t0 > t1:
+                t0, t1 = t1, t0
+                vals2 = vals2[[0, 2, 1, 3]]
+            key = (t0, t1)
+            if key not in twoq_fused:
+                twoq_order.append(key)
+                twoq_fused[key] = vals2.copy()
+            else:
+                twoq_fused[key] *= vals2
+
+        for q in oneq_order:
+            vals = oneq_fused[q]
+            if np.allclose(vals, np.array([1.0 + 0.0j, 1.0 + 0.0j], dtype=np.complex64), atol=1e-6):
+                continue
+            result.append(Gate(None, q, diagonal=torch.from_numpy(vals.copy())))
+
+        for t0, t1 in twoq_order:
+            vals = twoq_fused[(t0, t1)]
+            if np.allclose(
+                vals,
+                np.array([1.0 + 0.0j, 1.0 + 0.0j, 1.0 + 0.0j, 1.0 + 0.0j], dtype=np.complex64),
+                atol=1e-6,
+            ):
+                continue
+            result.append(Gate(None, t0, t1, diagonal=torch.from_numpy(vals.copy())))
+
+        i = j
+
+    if len(result) == n:
+        return gates
+    return tuple(result)
+
+
 def _gate_to_np_matrix(gate: Gate, dim: int) -> np.ndarray:
     """Convert a gate to its dim x dim numpy matrix representation."""
     if gate.diagonal is not None:
@@ -1580,6 +1683,9 @@ def _run_compiled_simulation(
                 # collapses via cheap 2x2/4x4 matrix checks, avoiding the
                 # expensive full-state diagonal array construction below.
                 fused_gates = _cancel_adjacent_inverse_pairs(step.gates)
+                # Cheap diagonal-run fusion: collapse repeated 1q/2q diagonal
+                # gates (e.g. RZ/CZ layers) by target without 2^n materialization.
+                fused_gates = _fuse_segment_local_diagonals(fused_gates)
                 # Cheap 1q fusion helps primarily on large static states where
                 # per-gate MPS dispatch dominates. Keep it off for smaller
                 # workloads to avoid compile-time overhead/regressions.
