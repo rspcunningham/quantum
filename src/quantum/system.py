@@ -92,6 +92,27 @@ class _DynamicCompiledGraph:
     terminal_measurements: tuple[Measurement, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _MonomialStreamSpec:
+    """Packed local-monomial gate run for one-shot MPS execution."""
+
+    gates: tuple[Gate, ...]
+    gate_ks: torch.Tensor
+    gate_targets: torch.Tensor
+    gate_permutations: torch.Tensor
+    gate_factors: torch.Tensor
+
+
+_MONOMIAL_STREAM_ATTR = "_monomial_stream_spec"
+
+
+def _gate_monomial_stream_spec(gate: Gate) -> _MonomialStreamSpec | None:
+    spec = getattr(gate, _MONOMIAL_STREAM_ATTR, None)
+    if isinstance(spec, _MonomialStreamSpec):
+        return spec
+    return None
+
+
 def _compile_execution_graph(circuit: Circuit) -> _DynamicCompiledGraph:
     """Compile any circuit into segment/conditional/measurement steps."""
     flattened: list[Gate | ConditionalGate | Measurement] = []
@@ -185,6 +206,10 @@ _MPS_MONOMIAL_SHADER_SOURCE = """
 #include <metal_stdlib>
 using namespace metal;
 
+inline float2 _cmul(float2 a, float2 b) {
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
 inline uint _subindex_for_targets(
     uint idx,
     constant int* targets,
@@ -204,6 +229,39 @@ inline uint _source_index_for_targets(
     uint idx,
     uint source_subindex,
     constant int* targets,
+    uint k,
+    uint n_qubits
+) {
+    uint src = idx;
+    for (uint j = 0; j < k; ++j) {
+        uint bitpos = n_qubits - 1u - uint(targets[j]);
+        uint mask = 1u << bitpos;
+        src &= ~mask;
+        uint bit = (source_subindex >> (k - 1u - j)) & 1u;
+        src |= bit << bitpos;
+    }
+    return src;
+}
+
+inline uint _subindex_for_targets_device(
+    uint idx,
+    const device int* targets,
+    uint k,
+    uint n_qubits
+) {
+    uint sub = 0;
+    for (uint j = 0; j < k; ++j) {
+        uint bitpos = n_qubits - 1u - uint(targets[j]);
+        uint bit = (idx >> bitpos) & 1u;
+        sub |= bit << (k - 1u - j);
+    }
+    return sub;
+}
+
+inline uint _source_index_for_targets_device(
+    uint idx,
+    uint source_subindex,
+    const device int* targets,
     uint k,
     uint n_qubits
 ) {
@@ -288,6 +346,43 @@ kernel void permute_subset_with_phase(
     float2 v = in_state[batch * uint(dim) + src_idx];
     float2 p = factors[sub];
     out_state[gid] = float2(v.x * p.x - v.y * p.y, v.x * p.y + v.y * p.x);
+}
+
+kernel void monomial_stream(
+    device const float2* in_state,
+    device float2* out_state,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    device const int* gate_ks,
+    device const int* gate_targets,
+    device const int* gate_permutations,
+    device const float2* gate_factors,
+    constant int& gate_count,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+
+    uint src_idx = idx;
+    float2 phase = float2(1.0, 0.0);
+
+    for (int gi = gate_count - 1; gi >= 0; --gi) {
+        uint k = uint(gate_ks[gi]);
+        const device int* targets = gate_targets + uint(gi) * 2u;
+        uint sub = _subindex_for_targets_device(src_idx, targets, k, uint(n_qubits));
+        uint mapped_sub = uint(gate_permutations[uint(gi) * 4u + sub]);
+        float2 factor = gate_factors[uint(gi) * 4u + sub];
+        phase = _cmul(phase, factor);
+        src_idx = _source_index_for_targets_device(src_idx, mapped_sub, targets, k, uint(n_qubits));
+    }
+
+    float2 v = in_state[batch * uint(dim) + src_idx];
+    out_state[gid] = _cmul(phase, v);
 }
 """
 
@@ -554,6 +649,112 @@ def _fuse_segment_local_diagonals(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
         i = j
 
     if len(result) == n:
+        return gates
+    return tuple(result)
+
+
+def _gate_local_monomial_tables(
+    gate: Gate,
+) -> tuple[int, tuple[int, int], np.ndarray, np.ndarray] | None:
+    """Return packed (k, targets2, perm4, factors4) for 1q/2q monomial gates."""
+    if _gate_monomial_stream_spec(gate) is not None:
+        return None
+
+    targets = tuple(gate.targets)
+    k = len(targets)
+    if k not in (1, 2):
+        return None
+
+    dim = 1 << k
+    perm = np.arange(dim, dtype=np.int32)
+    factors = np.ones(dim, dtype=np.complex64)
+
+    if gate.diagonal is not None:
+        factors = gate.diagonal.detach().cpu().numpy().astype(np.complex64, copy=False)
+    elif gate.permutation is not None:
+        perm = gate.permutation.detach().cpu().numpy().astype(np.int32, copy=False)
+        if gate.permutation_factors is not None:
+            factors = gate.permutation_factors.detach().cpu().numpy().astype(np.complex64, copy=False)
+    else:
+        return None
+
+    if k == 1:
+        perm4 = np.array([int(perm[0]), int(perm[1]), 0, 0], dtype=np.int32)
+        factors4 = np.array([factors[0], factors[1], 1.0 + 0.0j, 1.0 + 0.0j], dtype=np.complex64)
+        return 1, (targets[0], -1), perm4, factors4
+
+    perm4 = perm.astype(np.int32, copy=True)
+    factors4 = factors.astype(np.complex64, copy=True)
+    return 2, (targets[0], targets[1]), perm4, factors4
+
+
+def _make_monomial_stream_gate(spec: _MonomialStreamSpec) -> Gate:
+    # Gate constructor requires a valid matrix/diagonal payload. Use identity and
+    # attach compiled stream metadata so runtime dispatch bypasses the payload.
+    gate = Gate(None, 0, diagonal=torch.ones(2, dtype=torch.complex64))
+    gate._diagonal = None
+    setattr(gate, _MONOMIAL_STREAM_ATTR, spec)
+    return gate
+
+
+def _fuse_segment_local_monomial_streams(
+    gates: tuple[Gate, ...],
+    *,
+    min_run_len: int = 8,
+) -> tuple[Gate, ...]:
+    """Fuse long contiguous 1q/2q monomial runs into one stream gate."""
+    n = len(gates)
+    if n < min_run_len:
+        return gates
+
+    has_candidate = False
+    for gate in gates:
+        if _gate_local_monomial_tables(gate) is not None:
+            has_candidate = True
+            break
+    if not has_candidate:
+        return gates
+
+    result: list[Gate] = []
+    changed = False
+    i = 0
+    while i < n:
+        first = _gate_local_monomial_tables(gates[i])
+        if first is None:
+            result.append(gates[i])
+            i += 1
+            continue
+
+        run_payloads: list[tuple[int, tuple[int, int], np.ndarray, np.ndarray]] = [first]
+        j = i + 1
+        while j < n:
+            payload = _gate_local_monomial_tables(gates[j])
+            if payload is None:
+                break
+            run_payloads.append(payload)
+            j += 1
+
+        if j - i < min_run_len:
+            result.extend(gates[i:j])
+            i = j
+            continue
+
+        gate_ks = torch.tensor([p[0] for p in run_payloads], dtype=torch.int32)
+        gate_targets = torch.tensor([p[1] for p in run_payloads], dtype=torch.int32)
+        gate_permutations = torch.tensor(np.stack([p[2] for p in run_payloads]), dtype=torch.int32)
+        gate_factors = torch.tensor(np.stack([p[3] for p in run_payloads]), dtype=torch.complex64)
+        spec = _MonomialStreamSpec(
+            gates=gates[i:j],
+            gate_ks=gate_ks,
+            gate_targets=gate_targets,
+            gate_permutations=gate_permutations,
+            gate_factors=gate_factors,
+        )
+        result.append(_make_monomial_stream_gate(spec))
+        changed = True
+        i = j
+
+    if not changed:
         return gates
     return tuple(result)
 
@@ -931,6 +1132,11 @@ def _compile_segment_scalars(
     alpha_lists: list[tuple[complex, ...]] = []
 
     for gate in gates:
+        if _gate_monomial_stream_spec(gate) is not None:
+            offsets.append(-1)
+            alpha_lists.append(())
+            continue
+
         if gate.diagonal is not None:
             targets = tuple(gate.targets)
             k = len(targets)
@@ -1753,6 +1959,42 @@ def _run_compiled_simulation(
                     terminal_measurements=compiled.terminal_measurements,
                 )
 
+        # Collapse long local-monomial runs into one MPS kernel launch.
+        # This targets large cold-start workloads where repeated full-state
+        # diagonal/permutation passes dominate runtime.
+        enable_monomial_stream = (
+            device.type == "mps"
+            and n_qubits >= 20
+            and os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
+        )
+        if enable_monomial_stream:
+            streamed_steps: list[_DynamicGraphStep] = []
+            stream_changed = False
+            for step in compiled.steps:
+                if isinstance(step, _DynamicSegmentStep):
+                    streamed_gates = _fuse_segment_local_monomial_streams(step.gates)
+                    if streamed_gates is not step.gates:
+                        streamed_steps.append(_DynamicSegmentStep(gates=streamed_gates))
+                        stream_changed = True
+                    else:
+                        streamed_steps.append(step)
+                    continue
+                if isinstance(step, _DynamicConditionalStep):
+                    streamed_gates = _fuse_segment_local_monomial_streams(step.gates)
+                    if streamed_gates is not step.gates:
+                        streamed_steps.append(_DynamicConditionalStep(condition=step.condition, gates=streamed_gates))
+                        stream_changed = True
+                    else:
+                        streamed_steps.append(step)
+                    continue
+                streamed_steps.append(step)
+            if stream_changed:
+                compiled = _DynamicCompiledGraph(
+                    steps=tuple(streamed_steps),
+                    node_count=compiled.node_count,
+                    terminal_measurements=compiled.terminal_measurements,
+                )
+
         # Pre-cache gate scalars per segment to eliminate per-gate copy_ overhead.
         # On MPS, only beneficial at ≥17 qubits where per-gate scalar_tensor → copy_
         # overhead is significant. At 13-16q, MPS buffer allocation cost exceeds savings.
@@ -1994,6 +2236,7 @@ class BatchedQuantumSystem:
     _gate_permutations: dict[int, torch.Tensor]
     _gate_permutations_i32: dict[int, torch.Tensor]
     _gate_permutation_factors: dict[int, torch.Tensor]
+    _monomial_stream_buffers: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
     _targets_i32: dict[tuple[int, ...], torch.Tensor]
     _diagonal_subindices: dict[tuple[int, ...], torch.Tensor]
     _permutation_source_indices: dict[tuple[tuple[int, ...], int], torch.Tensor]
@@ -2016,6 +2259,7 @@ class BatchedQuantumSystem:
         self._gate_permutations = {}
         self._gate_permutations_i32 = {}
         self._gate_permutation_factors = {}
+        self._monomial_stream_buffers = {}
         self._targets_i32 = {}
         self._diagonal_subindices = {}
         self._permutation_source_indices = {}
@@ -2043,9 +2287,66 @@ class BatchedQuantumSystem:
             self._alt_state = torch.empty_like(self.state_vectors)
         return self._alt_state
 
+    def _device_monomial_stream_buffers(
+        self,
+        spec: _MonomialStreamSpec,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        key = id(spec)
+        cached = self._monomial_stream_buffers.get(key)
+        if cached is not None:
+            return cached
+
+        gate_ks = spec.gate_ks if spec.gate_ks.device == self.device else spec.gate_ks.to(dtype=torch.int32, device=self.device)
+        gate_targets = (
+            spec.gate_targets
+            if spec.gate_targets.device == self.device
+            else spec.gate_targets.to(dtype=torch.int32, device=self.device)
+        )
+        gate_permutations = (
+            spec.gate_permutations
+            if spec.gate_permutations.device == self.device
+            else spec.gate_permutations.to(dtype=torch.int32, device=self.device)
+        )
+        gate_factors = (
+            spec.gate_factors
+            if spec.gate_factors.device == self.device
+            else spec.gate_factors.to(dtype=torch.complex64, device=self.device)
+        )
+        result = (gate_ks, gate_targets, gate_permutations, gate_factors)
+        self._monomial_stream_buffers[key] = result
+        return result
+
+    def _apply_monomial_stream(self, spec: _MonomialStreamSpec) -> "BatchedQuantumSystem":
+        if self._mps_monomial_kernels is None:
+            for gate in spec.gates:
+                self.apply_gate(gate)
+            return self
+
+        dim = 1 << self.n_qubits
+        out_state = self._ensure_alt_state()
+        gate_ks, gate_targets, gate_permutations, gate_factors = self._device_monomial_stream_buffers(spec)
+        self._mps_monomial_kernels.monomial_stream(
+            self.state_vectors.reshape(-1),
+            out_state.reshape(-1),
+            self.n_qubits,
+            dim,
+            self.batch_size,
+            gate_ks.reshape(-1),
+            gate_targets.reshape(-1),
+            gate_permutations.reshape(-1),
+            gate_factors.reshape(-1),
+            int(gate_ks.shape[0]),
+        )
+        self.state_vectors, self._alt_state = self._alt_state, self.state_vectors
+        return self
+
     @torch.inference_mode()
     def apply_gate(self, gate: Gate) -> "BatchedQuantumSystem":
         """Apply a gate to all state vectors."""
+        stream_spec = _gate_monomial_stream_spec(gate)
+        if stream_spec is not None:
+            return self._apply_monomial_stream(stream_spec)
+
         if gate.diagonal is not None:
             return self._apply_diagonal_gate(gate)
         if gate.permutation is not None:
