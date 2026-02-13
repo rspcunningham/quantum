@@ -379,6 +379,7 @@ def _run_case_worker_loop(
 ) -> None:
     device = torch.device(device_type)
     aer_adapter: AerAdapter | None = AerAdapter() if backend == "aer" else None
+    cases_by_name: dict[str, BenchmarkCase] = {}
     try:
         while True:
             try:
@@ -391,7 +392,11 @@ def _run_case_worker_loop(
             if kind != "run_case":
                 continue
 
-            case: BenchmarkCase = message["case"]
+            incoming_case: BenchmarkCase = message["case"]
+            case = cases_by_name.get(incoming_case.name)
+            if case is None:
+                case = incoming_case
+                cases_by_name[case.name] = case
             case_timeout = message.get("case_timeout")
             try:
                 result = _run_case_local(
