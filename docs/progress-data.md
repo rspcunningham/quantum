@@ -40,6 +40,7 @@ Benchmark schedule: cold @1K (cache cleared) + warm @10K per circuit. Two calls 
 | 14 | `2026-02-12T192423.jsonl` | `cd36f38` | `cd36f38\n02-12T1924` | 81.1741 | 0.1898 | 229 |
 | 15 | `2026-02-12T201222.jsonl` | `382f2f1` | `382f2f1\n02-12T2012` | 113.4620 | 0.2287 | 232 |
 | 16 | `2026-02-12T205755.jsonl` | `adf2705` | `adf2705\n02-12T2057` | 131.5244 | 0.2453 | 232 |
+| 17 | `2026-02-12T220946.jsonl` | `fd66b54` | `fd66b54\n02-12T2209` | 132.3427 | 0.2296 | 235 |
 
 ## SOTA Reference — Qiskit Aer (Full Suite)
 
