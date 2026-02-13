@@ -472,6 +472,100 @@ kernel void dense_two_qubit(
 """
 
 
+_MPS_SPLIT_REIM_SHADER_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+inline float2 _cmul_split(float2 a, float2 b) {
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+kernel void split_dense_single_qubit(
+    device const float* in_re,
+    device const float* in_im,
+    device float* out_re,
+    device float* out_im,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int& target,
+    device const float2* coeffs,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint base = batch * uint(dim);
+
+    uint bitpos = uint(n_qubits - 1 - target);
+    uint mask = 1u << bitpos;
+    uint idx0 = idx & ~mask;
+    uint idx1 = idx0 | mask;
+    uint row = (idx >> bitpos) & 1u;
+
+    float2 v0 = float2(in_re[base + idx0], in_im[base + idx0]);
+    float2 v1 = float2(in_re[base + idx1], in_im[base + idx1]);
+    float2 c0 = coeffs[row * 2u + 0u];
+    float2 c1 = coeffs[row * 2u + 1u];
+    float2 out = _cmul_split(c0, v0) + _cmul_split(c1, v1);
+    out_re[gid] = out.x;
+    out_im[gid] = out.y;
+}
+
+kernel void split_dense_two_qubit(
+    device const float* in_re,
+    device const float* in_im,
+    device float* out_re,
+    device float* out_im,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    constant int& target0,
+    constant int& target1,
+    device const float2* coeffs,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint base = batch * uint(dim);
+
+    uint bitpos0 = uint(n_qubits - 1 - target0);
+    uint bitpos1 = uint(n_qubits - 1 - target1);
+    uint mask0 = 1u << bitpos0;
+    uint mask1 = 1u << bitpos1;
+
+    uint idx00 = idx & ~mask0 & ~mask1;
+    uint idx01 = idx00 | mask1;
+    uint idx10 = idx00 | mask0;
+    uint idx11 = idx00 | mask0 | mask1;
+
+    float2 v00 = float2(in_re[base + idx00], in_im[base + idx00]);
+    float2 v01 = float2(in_re[base + idx01], in_im[base + idx01]);
+    float2 v10 = float2(in_re[base + idx10], in_im[base + idx10]);
+    float2 v11 = float2(in_re[base + idx11], in_im[base + idx11]);
+
+    uint b0 = (idx >> bitpos0) & 1u;
+    uint b1 = (idx >> bitpos1) & 1u;
+    uint row = (b0 << 1u) | b1;
+
+    float2 c0 = coeffs[row * 4u + 0u];
+    float2 c1 = coeffs[row * 4u + 1u];
+    float2 c2 = coeffs[row * 4u + 2u];
+    float2 c3 = coeffs[row * 4u + 3u];
+    float2 out = _cmul_split(c0, v00) + _cmul_split(c1, v01) + _cmul_split(c2, v10) + _cmul_split(c3, v11);
+    out_re[gid] = out.x;
+    out_im[gid] = out.y;
+}
+"""
+
+
 @lru_cache(maxsize=1)
 def _mps_monomial_kernel_library() -> object | None:
     """Compile and cache custom MPS kernels for subset monomial gates."""
@@ -486,6 +580,14 @@ def _mps_dense_kernel_library() -> object | None:
     if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
         return None
     return torch.mps.compile_shader(_MPS_DENSE_SHADER_SOURCE)
+
+
+@lru_cache(maxsize=1)
+def _mps_split_reim_kernel_library() -> object | None:
+    """Compile and cache custom MPS kernels for split real/imag dense gate application."""
+    if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
+        return None
+    return torch.mps.compile_shader(_MPS_SPLIT_REIM_SHADER_SOURCE)
 
 
 def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
@@ -1878,6 +1980,9 @@ def _run_split_static_simulation(
     """Execute static circuits with split real/imag state layout."""
     dim = 1 << n_qubits
     half_dim = 1 << max(n_qubits - 1, 0)
+    split_dense_kernels = None
+    if device.type == "mps" and os.environ.get("QUANTUM_DISABLE_MPS_SPLIT_DENSE_KERNELS") != "1":
+        split_dense_kernels = _mps_split_reim_kernel_library()
 
     state_re = torch.zeros((1, dim), dtype=torch.float32, device=device)
     state_im = torch.zeros((1, dim), dtype=torch.float32, device=device)
@@ -1887,6 +1992,8 @@ def _run_split_static_simulation(
 
     dense_single_cache: dict[int, tuple[complex, complex, complex, complex]] = {}
     dense_two_cache: dict[int, tuple[tuple[complex, complex, complex, complex], ...]] = {}
+    dense_single_kernel_coeffs: dict[int, torch.Tensor] = {}
+    dense_two_kernel_coeffs: dict[int, tuple[tuple[int, int], torch.Tensor]] = {}
     diagonal_scalar_cache: dict[int, tuple[complex, ...]] = {}
     diagonal_coeff_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     permutation_cache: dict[int, torch.Tensor] = {}
@@ -2155,6 +2262,27 @@ def _run_split_static_simulation(
                 continue
 
             if k == 1:
+                if split_dense_kernels is not None:
+                    coeffs = dense_single_kernel_coeffs.get(id(gate))
+                    if coeffs is None:
+                        mat2 = _gate_to_np_matrix(gate, 2).reshape(-1)
+                        coeffs = torch.tensor(mat2, dtype=torch.complex64, device=device)
+                        dense_single_kernel_coeffs[id(gate)] = coeffs
+                    split_dense_kernels.split_dense_single_qubit(
+                        state_re.reshape(-1),
+                        state_im.reshape(-1),
+                        out_re.reshape(-1),
+                        out_im.reshape(-1),
+                        n_qubits,
+                        dim,
+                        1,
+                        targets[0],
+                        coeffs.reshape(-1),
+                    )
+                    state_re, out_re = out_re, state_re
+                    state_im, out_im = out_im, state_im
+                    continue
+
                 coeffs = dense_single_cache.get(id(gate))
                 if coeffs is None:
                     mat2 = _gate_to_np_matrix(gate, 2)
@@ -2179,6 +2307,36 @@ def _run_split_static_simulation(
                 continue
 
             if k == 2:
+                if split_dense_kernels is not None:
+                    cached_kernel = dense_two_kernel_coeffs.get(id(gate))
+                    if cached_kernel is None:
+                        mat4 = _gate_to_np_matrix(gate, 4)
+                        t0, t1 = targets
+                        ordered_targets = (t0, t1)
+                        if t0 > t1:
+                            perm = [0, 2, 1, 3]
+                            mat4 = mat4[np.ix_(perm, perm)]
+                            ordered_targets = (t1, t0)
+                        coeffs = torch.tensor(mat4.reshape(-1), dtype=torch.complex64, device=device)
+                        cached_kernel = (ordered_targets, coeffs)
+                        dense_two_kernel_coeffs[id(gate)] = cached_kernel
+                    ordered_targets, coeffs = cached_kernel
+                    split_dense_kernels.split_dense_two_qubit(
+                        state_re.reshape(-1),
+                        state_im.reshape(-1),
+                        out_re.reshape(-1),
+                        out_im.reshape(-1),
+                        n_qubits,
+                        dim,
+                        1,
+                        ordered_targets[0],
+                        ordered_targets[1],
+                        coeffs.reshape(-1),
+                    )
+                    state_re, out_re = out_re, state_re
+                    state_im, out_im = out_im, state_im
+                    continue
+
                 rows = dense_two_cache.get(id(gate))
                 if rows is None:
                     mat4 = _gate_to_np_matrix(gate, 4)
