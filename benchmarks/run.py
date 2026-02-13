@@ -3,6 +3,7 @@
 import argparse
 import gc
 import json
+import multiprocessing as mp
 import os
 import resource
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import time
 from collections.abc import Sequence
 from datetime import datetime
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import torch
@@ -288,7 +290,121 @@ def _print_hotspot_block(
         )
 
 
-def run_case(
+def _print_case_row_verbose(row: dict) -> None:
+    labels = {SHOT_COUNTS[0]: "cold", **{s: "warm" for s in SHOT_COUNTS[1:]}}
+    times = row["times_s"]
+    cpu_times = row["cpu_times_s"]
+    metric_shots = row.get("metric_shots")
+    total_ops = int(row["ops"]["gates"] + row["ops"]["measurements"] + row["ops"]["conditional"])
+    shots_str = "    ".join(
+        (
+            f"{labels[s]}@{s} -> {times[str(s)]:.3f}s (cpu: {cpu_times[str(s)]:.3f}s)"
+            if str(s) in times else
+            f"{labels[s]}@{s} -> skipped"
+        )
+        for s in SHOT_COUNTS
+    )
+    mem = row.get("memory", {})
+    mem_parts = [f"{k}: {float(v):.1f}" for k, v in mem.items()]
+    mem_str = ", ".join(mem_parts) if mem_parts else "n/a"
+    metric_label = f"at {metric_shots} shots" if metric_shots is not None else "n/a"
+    print(f"\n{row['case']} [{row['backend']}] ({row['n_qubits']} qubits, {total_ops} ops, {row['workload_class']})")
+    print(f"  shots:    {shots_str}")
+    print(f"  ops/s:    {row['ops_per_sec']}  |  shots/s: {row['shots_per_sec']}  |  cpu util: {row['cpu_util']} ({metric_label})")
+    print(f"  memory:   {mem_str}")
+    if row.get("aborted"):
+        status = f"ABORT — {row.get('abort_reason')}"
+    else:
+        status = "PASS" if row.get("correct") else f"FAIL — {'; '.join(row.get('errors', []))}"
+    print(f"  correct:  {status}")
+
+
+def _terminate_process(process: mp.Process, *, grace_seconds: float = 1.0) -> None:
+    if not process.is_alive():
+        process.join(timeout=0)
+        return
+    process.terminate()
+    process.join(timeout=grace_seconds)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=grace_seconds)
+
+
+def _build_timeout_row(
+    case: BenchmarkCase,
+    *,
+    backend: str,
+    device: torch.device,
+    git_hash: str,
+    abort_reason: str,
+    times: dict[str, float],
+    cpu_times: dict[str, float],
+) -> dict:
+    row = build_aborted_row(
+        case,
+        backend=backend,
+        device=device,
+        git_hash=git_hash,
+        abort_reason=abort_reason,
+        memory_stats={},
+    )
+    row["times_s"] = {k: round(v, 4) for k, v in times.items()}
+    row["cpu_times_s"] = {k: round(v, 4) for k, v in cpu_times.items()}
+
+    completed_shots = [s for s in SHOT_COUNTS if str(s) in row["times_s"]]
+    metric_shots = max(completed_shots) if completed_shots else None
+    row["metric_shots"] = metric_shots
+    if metric_shots is not None:
+        total_ops = int(row["ops"]["gates"] + row["ops"]["measurements"] + row["ops"]["conditional"])
+        wall_max = float(row["times_s"][str(metric_shots)])
+        cpu_max = float(row["cpu_times_s"].get(str(metric_shots), 0.0))
+        row["ops_per_sec"] = round(total_ops / wall_max, 1) if wall_max > 0 else 0.0
+        row["shots_per_sec"] = round(metric_shots / wall_max, 1) if wall_max > 0 else 0.0
+        row["cpu_util"] = round(cpu_max / wall_max, 3) if wall_max > 0 else 0.0
+    return row
+
+
+def _run_case_worker(
+    case: BenchmarkCase,
+    *,
+    device_type: str,
+    verbose: bool,
+    git_hash: str,
+    backend: str,
+    case_timeout: float | None,
+    conn: Connection,
+) -> None:
+    device = torch.device(device_type)
+    aer_adapter: AerAdapter | None = AerAdapter() if backend == "aer" else None
+    try:
+        result = _run_case_local(
+            case,
+            device,
+            verbose,
+            git_hash,
+            backend=backend,
+            case_timeout=case_timeout,
+            aer_adapter=aer_adapter,
+            progress_conn=conn,
+        )
+        conn.send({"kind": "result", "result": result})
+    except BaseException as error:
+        try:
+            conn.send({
+                "kind": "error",
+                "error": str(error).strip(),
+                "is_oom": is_oom_error(error),
+            })
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _run_case_local(
     case: BenchmarkCase,
     device: torch.device,
     verbose: bool,
@@ -297,6 +413,7 @@ def run_case(
     backend: str = "native",
     case_timeout: float | None = None,
     aer_adapter: AerAdapter | None = None,
+    progress_conn: Connection | None = None,
 ) -> dict:
     n_qubits = case.n_qubits
     display_qubits = n_qubits if n_qubits is not None else infer_resources(case.circuit)[0]
@@ -320,6 +437,8 @@ def run_case(
                 _circuit_compilation_cache.pop(id(case.circuit), None)
 
             try:
+                if progress_conn is not None:
+                    progress_conn.send({"kind": "shot_start", "shots": shots})
                 sync_device(device)
                 wall_start = time.perf_counter()
                 cpu_start = time.process_time()
@@ -327,6 +446,13 @@ def run_case(
                 sync_device(device)
                 wall_elapsed = time.perf_counter() - wall_start
                 cpu_elapsed = time.process_time() - cpu_start
+                if progress_conn is not None:
+                    progress_conn.send({
+                        "kind": "shot_done",
+                        "shots": shots,
+                        "wall_elapsed": wall_elapsed,
+                        "cpu_elapsed": cpu_elapsed,
+                    })
             except RuntimeError as error:
                 if is_oom_error(error):
                     abort_reason = f"OOM at {shots} shots: {str(error).strip()}"
@@ -367,11 +493,20 @@ def run_case(
             if abort_reason is None and prepared_case is not None:
                 for shots in SHOT_COUNTS:
                     try:
+                        if progress_conn is not None:
+                            progress_conn.send({"kind": "shot_start", "shots": shots})
                         wall_start = time.perf_counter()
                         cpu_start = time.process_time()
                         result = aer_adapter.run(prepared_case, shots)
                         wall_elapsed = time.perf_counter() - wall_start
                         cpu_elapsed = time.process_time() - cpu_start
+                        if progress_conn is not None:
+                            progress_conn.send({
+                                "kind": "shot_done",
+                                "shots": shots,
+                                "wall_elapsed": wall_elapsed,
+                                "cpu_elapsed": cpu_elapsed,
+                            })
                     except Exception as error:  # pragma: no cover - depends on environment
                         abort_reason = f"aer runtime abort at {shots} shots: {str(error).strip()}"
                         break
@@ -416,30 +551,7 @@ def run_case(
         shots_per_sec = 0.0
         cpu_util = 0.0
 
-    if verbose:
-        _labels = {SHOT_COUNTS[0]: "cold", **{s: "warm" for s in SHOT_COUNTS[1:]}}
-        shots_str = "    ".join(
-            (
-                f"{_labels[s]}@{s} \u2192 {times[str(s)]:.3f}s (cpu: {cpu_times[str(s)]:.3f}s)"
-                if str(s) in times else
-                f"{_labels[s]}@{s} \u2192 skipped"
-            )
-            for s in SHOT_COUNTS
-        )
-        mem_parts = [f"{k}: {v:.1f}" for k, v in memory_stats.items()]
-        mem_str = ", ".join(mem_parts) if mem_parts else "n/a"
-        metric_label = f"at {metric_shots} shots" if metric_shots is not None else "n/a"
-        print(f"\n{case.name} [{backend}] ({display_qubits} qubits, {total_ops} ops, {workload['workload_class']})")
-        print(f"  shots:    {shots_str}")
-        print(f"  ops/s:    {ops_per_sec}  |  shots/s: {shots_per_sec}  |  cpu util: {cpu_util} ({metric_label})")
-        print(f"  memory:   {mem_str}")
-        if abort_reason is not None:
-            status = f"ABORT \u2014 {abort_reason}"
-        else:
-            status = "PASS" if correct else f"FAIL \u2014 {'; '.join(errors)}"
-        print(f"  correct:  {status}")
-
-    return {
+    row = {
         "backend": backend,
         "case": case.name,
         "git_hash": git_hash,
@@ -462,6 +574,137 @@ def run_case(
         "abort_reason": abort_reason,
         "errors": errors,
     }
+    if verbose:
+        _print_case_row_verbose(row)
+    return row
+
+
+def run_case(
+    case: BenchmarkCase,
+    device: torch.device,
+    verbose: bool,
+    git_hash: str,
+    *,
+    backend: str = "native",
+    case_timeout: float | None = None,
+    aer_adapter: AerAdapter | None = None,
+) -> dict:
+    if case_timeout is None:
+        return _run_case_local(
+            case,
+            device,
+            verbose,
+            git_hash,
+            backend=backend,
+            case_timeout=None,
+            aer_adapter=aer_adapter,
+        )
+
+    ctx = mp.get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    worker = ctx.Process(
+        target=_run_case_worker,
+        kwargs={
+            "case": case,
+            "device_type": device.type,
+            "verbose": verbose,
+            "git_hash": git_hash,
+            "backend": backend,
+            "case_timeout": case_timeout,
+            "conn": child_conn,
+        },
+    )
+    worker.start()
+    child_conn.close()
+
+    in_flight_shot: int | None = None
+    shot_start_monotonic: float | None = None
+    partial_times: dict[str, float] = {}
+    partial_cpu_times: dict[str, float] = {}
+    worker_result: dict | None = None
+    worker_error: dict | None = None
+
+    while True:
+        try:
+            if parent_conn.poll(0.05):
+                msg = parent_conn.recv()
+                kind = msg.get("kind")
+                if kind == "shot_start":
+                    in_flight_shot = int(msg["shots"])
+                    shot_start_monotonic = time.perf_counter()
+                elif kind == "shot_done":
+                    shot_value = int(msg["shots"])
+                    partial_times[str(shot_value)] = float(msg["wall_elapsed"])
+                    partial_cpu_times[str(shot_value)] = float(msg["cpu_elapsed"])
+                    in_flight_shot = None
+                    shot_start_monotonic = None
+                elif kind == "result":
+                    worker_result = msg["result"]
+                    break
+                elif kind == "error":
+                    worker_error = msg
+                    break
+        except EOFError:
+            pass
+
+        if (
+            in_flight_shot is not None
+            and shot_start_monotonic is not None
+            and (time.perf_counter() - shot_start_monotonic) > case_timeout
+        ):
+            _terminate_process(worker)
+            abort_reason = f"timeout at {in_flight_shot} shots (>{case_timeout:.0f}s hard limit)"
+            timed_out_row = _build_timeout_row(
+                case,
+                backend=backend,
+                device=device,
+                git_hash=git_hash,
+                abort_reason=abort_reason,
+                times=partial_times,
+                cpu_times=partial_cpu_times,
+            )
+            if verbose:
+                _print_case_row_verbose(timed_out_row)
+            parent_conn.close()
+            return timed_out_row
+
+        if not worker.is_alive():
+            while True:
+                try:
+                    if not parent_conn.poll():
+                        break
+                    msg = parent_conn.recv()
+                except EOFError:
+                    break
+                kind = msg.get("kind")
+                if kind == "result":
+                    worker_result = msg["result"]
+                elif kind == "error":
+                    worker_error = msg
+            break
+
+    parent_conn.close()
+    worker.join(timeout=0)
+
+    if worker_result is not None:
+        return worker_result
+
+    if worker_error is not None:
+        error_text = str(worker_error.get("error", "")).strip()
+        is_oom = bool(worker_error.get("is_oom"))
+        if is_oom:
+            return _build_timeout_row(
+                case,
+                backend=backend,
+                device=device,
+                git_hash=git_hash,
+                abort_reason=f"outer OOM: {error_text}",
+                times=partial_times,
+                cpu_times=partial_cpu_times,
+            )
+        raise RuntimeError(error_text or "worker error")
+
+    raise RuntimeError("worker exited without result")
 
 
 def build_aborted_row(
