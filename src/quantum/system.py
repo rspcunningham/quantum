@@ -782,6 +782,150 @@ def _single_qubit_gate_runtime_cost(gate: Gate) -> float:
     return 1.0
 
 
+def _two_qubit_gate_runtime_cost(gate: Gate) -> float:
+    """Relative runtime cost model for 2q gate application."""
+    if gate.permutation is not None:
+        return 0.45
+    if gate.diagonal is not None:
+        return 0.6
+    return 1.0
+
+
+def _gate_matrix_on_ordered_pair(gate: Gate, q0: int, q1: int) -> np.ndarray:
+    """Embed a 1q/2q gate onto ordered qubit pair (q0, q1)."""
+    targets = tuple(gate.targets)
+    k = len(targets)
+    if k == 1:
+        mat2 = _gate_to_np_matrix(gate, 2)
+        i2 = np.eye(2, dtype=np.complex64)
+        if targets[0] == q0:
+            return np.kron(mat2, i2)
+        if targets[0] == q1:
+            return np.kron(i2, mat2)
+        raise ValueError("Single-qubit target is outside the fusion pair")
+    if k == 2:
+        mat4 = _gate_to_np_matrix(gate, 4)
+        t0, t1 = targets
+        if t0 == q0 and t1 == q1:
+            return mat4
+        if t0 == q1 and t1 == q0:
+            perm = [0, 2, 1, 3]
+            return mat4[np.ix_(perm, perm)]
+        raise ValueError("Two-qubit gate targets do not match the fusion pair")
+    raise ValueError("Only 1q/2q gates can be fused into a pair block")
+
+
+def _fuse_segment_dense_pair_regions(
+    gates: tuple[Gate, ...],
+    *,
+    min_region_len: int = 4,
+) -> tuple[Gate, ...]:
+    """Fuse contiguous 1q/2q regions bounded to one qubit pair into one 4x4 gate.
+
+    This is exact algebraic fusion (no approximation): for any region where all
+    gates act only on qubits {q0, q1}, multiply their matrices into one gate U
+    so the sequence applies as ``U @ state`` on that pair.
+    """
+    n = len(gates)
+    if n < min_region_len:
+        return gates
+
+    has_pair_region = False
+    i = 0
+    while i < n:
+        if _gate_monomial_stream_spec(gates[i]) is not None:
+            i += 1
+            continue
+        if len(gates[i].targets) > 2:
+            i += 1
+            continue
+        region_targets = set(gates[i].targets)
+        j = i + 1
+        while j < n:
+            gj = gates[j]
+            if _gate_monomial_stream_spec(gj) is not None or len(gj.targets) > 2:
+                break
+            union = region_targets | set(gj.targets)
+            if len(union) > 2:
+                break
+            region_targets = union
+            j += 1
+        if len(region_targets) == 2 and (j - i) >= min_region_len:
+            has_pair_region = True
+            break
+        i = j
+    if not has_pair_region:
+        return gates
+
+    identity_4x4 = np.eye(4, dtype=np.complex64)
+    result: list[Gate] = []
+    changed = False
+    i = 0
+    while i < n:
+        if _gate_monomial_stream_spec(gates[i]) is not None or len(gates[i].targets) > 2:
+            result.append(gates[i])
+            i += 1
+            continue
+
+        region_targets = set(gates[i].targets)
+        j = i + 1
+        while j < n:
+            gj = gates[j]
+            if _gate_monomial_stream_spec(gj) is not None or len(gj.targets) > 2:
+                break
+            union = region_targets | set(gj.targets)
+            if len(union) > 2:
+                break
+            region_targets = union
+            j += 1
+
+        region_len = j - i
+        if len(region_targets) < 2 or region_len < min_region_len:
+            result.extend(gates[i:j])
+            i = j
+            continue
+
+        q0, q1 = sorted(region_targets)
+        fused = np.eye(4, dtype=np.complex64)
+        failed = False
+        before_cost = 0.0
+        for k in range(i, j):
+            gk = gates[k]
+            if len(gk.targets) == 1:
+                before_cost += _single_qubit_gate_runtime_cost(gk)
+            else:
+                before_cost += _two_qubit_gate_runtime_cost(gk)
+            try:
+                fused = _gate_matrix_on_ordered_pair(gk, q0, q1) @ fused
+            except ValueError:
+                failed = True
+                break
+
+        if failed:
+            result.extend(gates[i:j])
+            i = j
+            continue
+
+        # Keep only regions with clear runtime upside.
+        if before_cost < 1.8:
+            result.extend(gates[i:j])
+            i = j
+            continue
+
+        if np.allclose(fused, identity_4x4, atol=1e-6):
+            changed = True
+            i = j
+            continue
+
+        result.append(Gate(torch.tensor(fused, dtype=torch.complex64), q0, q1))
+        changed = True
+        i = j
+
+    if not changed:
+        return gates
+    return tuple(result)
+
+
 def _fuse_segment_single_qubit_gates(gates: tuple[Gate, ...]) -> tuple[Gate, ...]:
     """Fuse 1q gates within contiguous 1q-only regions using a cost model.
 
@@ -1907,6 +2051,9 @@ def _run_compiled_simulation(
                 # per-gate MPS dispatch dominates. Keep it off for smaller
                 # workloads to avoid compile-time overhead/regressions.
                 if compiled.node_count == 0 and n_qubits >= 20:
+                    # Exact dense-region fusion: collapse contiguous local
+                    # 1q/2q blocks on one qubit pair into a single 4x4 gate.
+                    fused_gates = _fuse_segment_dense_pair_regions(fused_gates)
                     fused_gates = _fuse_segment_single_qubit_gates(fused_gates)
                     fused_gates = _cancel_adjacent_inverse_pairs(fused_gates)
                 if run_heavy_fusion:
