@@ -566,6 +566,91 @@ kernel void split_dense_two_qubit(
 """
 
 
+_MPS_SPLIT_MONOMIAL_SHADER_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+inline float2 _cmul_split(float2 a, float2 b) {
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+inline uint _subindex_for_targets_device(
+    uint idx,
+    const device int* targets,
+    uint k,
+    uint n_qubits
+) {
+    uint sub = 0;
+    for (uint j = 0; j < k; ++j) {
+        uint bitpos = n_qubits - 1u - uint(targets[j]);
+        uint bit = (idx >> bitpos) & 1u;
+        sub |= bit << (k - 1u - j);
+    }
+    return sub;
+}
+
+inline uint _source_index_for_targets_device(
+    uint idx,
+    uint source_subindex,
+    const device int* targets,
+    uint k,
+    uint n_qubits
+) {
+    uint src = idx;
+    for (uint j = 0; j < k; ++j) {
+        uint bitpos = n_qubits - 1u - uint(targets[j]);
+        uint mask = 1u << bitpos;
+        src &= ~mask;
+        uint bit = (source_subindex >> (k - 1u - j)) & 1u;
+        src |= bit << bitpos;
+    }
+    return src;
+}
+
+kernel void split_monomial_stream(
+    device const float* in_re,
+    device const float* in_im,
+    device float* out_re,
+    device float* out_im,
+    constant int& n_qubits,
+    constant int& dim,
+    constant int& batch_size,
+    device const int* gate_ks,
+    device const int* gate_targets,
+    device const int* gate_permutations,
+    device const float2* gate_factors,
+    constant int& gate_count,
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = uint(dim) * uint(batch_size);
+    if (gid >= total) {
+        return;
+    }
+    uint batch = gid / uint(dim);
+    uint idx = gid - batch * uint(dim);
+    uint base = batch * uint(dim);
+
+    uint src_idx = idx;
+    float2 phase = float2(1.0, 0.0);
+
+    for (int gi = gate_count - 1; gi >= 0; --gi) {
+        uint k = uint(gate_ks[gi]);
+        const device int* targets = gate_targets + uint(gi) * 2u;
+        uint sub = _subindex_for_targets_device(src_idx, targets, k, uint(n_qubits));
+        uint mapped_sub = uint(gate_permutations[uint(gi) * 4u + sub]);
+        float2 factor = gate_factors[uint(gi) * 4u + sub];
+        phase = _cmul_split(phase, factor);
+        src_idx = _source_index_for_targets_device(src_idx, mapped_sub, targets, k, uint(n_qubits));
+    }
+
+    float2 v = float2(in_re[base + src_idx], in_im[base + src_idx]);
+    float2 out = _cmul_split(phase, v);
+    out_re[gid] = out.x;
+    out_im[gid] = out.y;
+}
+"""
+
+
 @lru_cache(maxsize=1)
 def _mps_monomial_kernel_library() -> object | None:
     """Compile and cache custom MPS kernels for subset monomial gates."""
@@ -588,6 +673,14 @@ def _mps_split_reim_kernel_library() -> object | None:
     if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
         return None
     return torch.mps.compile_shader(_MPS_SPLIT_REIM_SHADER_SOURCE)
+
+
+@lru_cache(maxsize=1)
+def _mps_split_monomial_kernel_library() -> object | None:
+    """Compile and cache custom MPS kernels for split real/imag monomial streams."""
+    if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
+        return None
+    return torch.mps.compile_shader(_MPS_SPLIT_MONOMIAL_SHADER_SOURCE)
 
 
 def _fuse_segment_diagonals(gates: tuple[Gate, ...], n_qubits: int) -> tuple[Gate, ...]:
@@ -1711,8 +1804,6 @@ def _can_use_split_static_executor(
         if not isinstance(step, _DynamicSegmentStep):
             return False
         for gate in step.gates:
-            if _gate_monomial_stream_spec(gate) is not None:
-                return False
             if gate.diagonal is None and gate.permutation is None and len(gate.targets) not in (1, 2):
                 return False
     return True
@@ -1981,8 +2072,11 @@ def _run_split_static_simulation(
     dim = 1 << n_qubits
     half_dim = 1 << max(n_qubits - 1, 0)
     split_dense_kernels = None
+    split_monomial_kernels = None
     if device.type == "mps" and os.environ.get("QUANTUM_DISABLE_MPS_SPLIT_DENSE_KERNELS") != "1":
         split_dense_kernels = _mps_split_reim_kernel_library()
+    if device.type == "mps" and os.environ.get("QUANTUM_DISABLE_MPS_SPLIT_MONOMIAL_KERNELS") != "1":
+        split_monomial_kernels = _mps_split_monomial_kernel_library()
 
     state_re = torch.zeros((1, dim), dtype=torch.float32, device=device)
     state_im = torch.zeros((1, dim), dtype=torch.float32, device=device)
@@ -2000,6 +2094,7 @@ def _run_split_static_simulation(
     permutation_factor_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     subset_subindex_cache: dict[tuple[int, ...], torch.Tensor] = {}
     permutation_source_cache: dict[tuple[tuple[int, ...], int], torch.Tensor] = {}
+    monomial_stream_buffer_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
     full_indices: torch.Tensor | None = None
 
     def _full_indices() -> torch.Tensor:
@@ -2008,13 +2103,65 @@ def _run_split_static_simulation(
             full_indices = torch.arange(dim, dtype=torch.int64, device=device)
         return full_indices
 
+    def _split_stream_device_buffers(
+        spec: _MonomialStreamSpec,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        key = id(spec)
+        cached = monomial_stream_buffer_cache.get(key)
+        if cached is not None:
+            return cached
+
+        gate_ks = (
+            spec.gate_ks
+            if spec.gate_ks.device == device
+            else spec.gate_ks.to(dtype=torch.int32, device=device)
+        )
+        gate_targets = (
+            spec.gate_targets
+            if spec.gate_targets.device == device
+            else spec.gate_targets.to(dtype=torch.int32, device=device)
+        )
+        gate_permutations = (
+            spec.gate_permutations
+            if spec.gate_permutations.device == device
+            else spec.gate_permutations.to(dtype=torch.int32, device=device)
+        )
+        gate_factors = (
+            spec.gate_factors
+            if spec.gate_factors.device == device
+            else spec.gate_factors.to(dtype=torch.complex64, device=device)
+        )
+        result = (gate_ks, gate_targets, gate_permutations, gate_factors)
+        monomial_stream_buffer_cache[key] = result
+        return result
+
     for step in compiled.steps:
         if not isinstance(step, _DynamicSegmentStep):
             raise RuntimeError("Split static executor only supports static segment-only graphs")
 
         for gate in step.gates:
-            if _gate_monomial_stream_spec(gate) is not None:
-                raise RuntimeError("Split static executor does not support monomial stream pseudo-gates")
+            stream_spec = _gate_monomial_stream_spec(gate)
+            if stream_spec is not None:
+                if split_monomial_kernels is None:
+                    raise RuntimeError("Split static executor missing monomial stream kernel support")
+                gate_ks, gate_targets, gate_permutations, gate_factors = _split_stream_device_buffers(stream_spec)
+                split_monomial_kernels.split_monomial_stream(
+                    state_re.reshape(-1),
+                    state_im.reshape(-1),
+                    out_re.reshape(-1),
+                    out_im.reshape(-1),
+                    n_qubits,
+                    dim,
+                    1,
+                    gate_ks.reshape(-1),
+                    gate_targets.reshape(-1),
+                    gate_permutations.reshape(-1),
+                    gate_factors.reshape(-1),
+                    int(gate_ks.shape[0]),
+                )
+                state_re, out_re = out_re, state_re
+                state_im, out_im = out_im, state_im
+                continue
 
             targets = tuple(gate.targets)
             k = len(targets)
@@ -2957,8 +3104,11 @@ def _run_compiled_simulation(
         # diagonal/permutation passes dominate runtime.
         enable_monomial_stream = (
             device.type == "mps"
-            and not use_split_static_executor
             and os.environ.get("QUANTUM_DISABLE_MONOMIAL_STREAM") != "1"
+            and (
+                not use_split_static_executor
+                or _mps_split_monomial_kernel_library() is not None
+            )
         )
         if enable_monomial_stream:
             streamed_steps: list[_DynamicGraphStep] = []
