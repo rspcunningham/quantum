@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Sequence
 
-import torch
+import numpy as np
 
 from quantum import infer_resources
 from quantum.gates import Circuit, ConditionalGate, Gate, Measurement
@@ -15,7 +15,7 @@ from quantum.gates import Circuit, ConditionalGate, Gate, Measurement
 class IRGate:
     """A gate operation with explicit matrix and target ordering."""
 
-    tensor: torch.Tensor
+    tensor: np.ndarray
     targets: tuple[int, ...]
 
 

@@ -2,29 +2,33 @@
 
 import math
 
+import numpy as np
+
 from quantum import (
     Circuit,
     QuantumRegister,
     registers,
     H, X, I,
     CX,
-    ControlledGateType,
-    GateType,
+    CustomGateType,
     measure_all,
 )
 from benchmarks.cases import BenchmarkCase
 
 
+def _mcx(n_controls: int) -> CustomGateType:
+    """Multi-controlled X gate with n_controls control qubits."""
+    dim = 1 << (n_controls + 1)
+    matrix = np.eye(dim, dtype=np.complex64)
+    matrix[dim - 2, dim - 2] = 0
+    matrix[dim - 1, dim - 1] = 0
+    matrix[dim - 2, dim - 1] = 1
+    matrix[dim - 1, dim - 2] = 1
+    return CustomGateType(matrix=matrix)
+
+
 def _xor(in_1: int, in_2: int, out: int) -> Circuit:
     return CX(in_1, out) + CX(in_2, out)
-
-
-def _get_controller(
-    n_controls: int, gate_type: GateType | ControlledGateType
-) -> GateType | ControlledGateType:
-    if n_controls == 0:
-        return gate_type
-    return _get_controller(n_controls - 1, ControlledGateType(gate_type))
 
 
 def _get_if_qubitstring_gate(
@@ -32,13 +36,14 @@ def _get_if_qubitstring_gate(
 ) -> Circuit:
     assert len(test_qubits) == len(if_value)
 
-    def test_gate(v: int) -> GateType:
+    def test_gate(v: int):
         return X if v == 0 else I
 
+    mcx = _mcx(len(test_qubits))
     test_gates = Circuit([test_gate(if_value[i])(test_qubits[i]) for i in range(len(test_qubits))])
     return (
         test_gates
-        + _get_controller(len(test_qubits), X)(*test_qubits, store_qubit)
+        + mcx(*test_qubits, store_qubit)
         + test_gates.inverse()
     )
 
@@ -85,7 +90,8 @@ def _get_oracle(
 
 
 def _get_diffuser(input_reg: QuantumRegister, ancilla: int) -> Circuit:
-    controller = _get_controller(len(input_reg), X)(*input_reg, ancilla)
+    mcx = _mcx(len(input_reg))
+    controller = mcx(*input_reg, ancilla)
     return H.on(input_reg) + X.on(input_reg) + controller + X.on(input_reg) + H.on(input_reg)
 
 

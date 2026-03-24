@@ -4,66 +4,63 @@ Self-contained instructions for running the optimization loop on this quantum si
 
 ## Philosophy
 
-This is a **general-purpose quantum simulator**. The benchmark suite exists to quantify progress, not to define it. Solving for one special case doesn't help — any optimization must improve the simulator's general performance across diverse circuit structures, with dense output distributions (real-world circuits), not just sparse ones (textbook circuits).
+This is a **general-purpose quantum simulator**. The benchmark suite exists to quantify progress, not to define it. Any optimization must improve general performance across diverse circuit structures with dense output distributions (real-world circuits), not just sparse ones (textbook circuits).
 
-The external reference backend is **Qiskit Aer**, but for the optimization loop it is treated as a fixed baseline dataset. The main question is not "did one case get faster?" but "did native improve broadly while keeping or improving completion rate vs the pinned Aer baseline?"
-
-Think big. Read `docs/experiment-log.md` to understand what's been tried, what worked, and what failed — then think about what hasn't been tried yet. The biggest wins have historically come from rethinking the execution model, not from making existing code faster.
+Think big. Read `results.tsv` to understand what's been tried, what worked, and what failed — then think about what hasn't been tried yet. The biggest wins have historically come from rethinking the execution model, not from making existing code faster.
 
 ## Scope
 
 - **Optimization targets**: `src/quantum/system.py` and `src/quantum/gates.py`. Do not modify benchmark cases or the user-facing API (gate constructors, `run_simulation` signature, `Circuit`/`QuantumRegister` interface).
-- **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases.
+- **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases. No caching of simulation results or output distributions between calls — the simulator must do the work each time.
 - **Platform constraints**: This runs on Apple Silicon (M1 Max, 32 GB). Solutions must be callable from Python and optimized for this hardware. How you achieve that — PyTorch, native code extensions, GPU shaders, anything — is up to you.
-- **Benchmark execution in scope**: run `native` only during normal optimization iterations. `aer` is a pinned reference JSONL used for comparison graphics.
+
+## Setup
+
+1. **Agree on a run tag** with the user (e.g. `mar23`). The branch `optimize/<tag>` must not already exist.
+2. **Create the branch**: `git checkout -b optimize/<tag>` from current main.
+3. **Read the in-scope files**: `src/quantum/system.py`, `src/quantum/gates.py`, and `results.tsv` (if it exists from a prior run) for context on what's been tried.
+4. **Read the latest native JSONL** in `benchmarks/results/` and the pinned `benchmarks/results/aer-reference.jsonl` to understand current per-case performance.
+5. **Initialize `results.tsv`**: create it with just the header row. The baseline will be recorded after the first benchmark.
+6. **Establish baseline**: run the benchmark as-is (no code changes) and record the first row with status `keep`.
+7. **Confirm and go**: confirm setup looks good, then kick off the loop.
 
 ## The loop
 
 ```
-1. Profile    — identify where time is actually spent
-2. Hypothesize — form a concrete, falsifiable prediction
-3. Implement  — apply the change
-4. Commit     — commit before benchmarking (creates clean audit trail)
-5. Benchmark  — run full suite, evaluate correctness + timing
-6. Evaluate   — compare against prior run, accept or revert
-7. Record     — log outcome and refresh comparison artifacts
+LOOP FOREVER:
+
+1. Analyze   — read latest results, identify where time is spent
+2. Hypothesize — state what you're changing and why
+3. Implement — edit system.py and/or gates.py
+4. Commit    — git commit (creates revert point)
+5. Benchmark — uv run bench -v > run.log 2>&1
+6. Record    — read results, append to results.tsv
+7. Decide    — keep (advance) or discard (git reset)
 ```
 
-Each step in detail:
+### 1. Analyze
 
-### 1. Profile
+Read the latest benchmark JSONL to identify where time is spent. The per-case wall times *are* your profile — which cases are slowest, which families dominate the total.
 
-**Start here, not with a benchmark run.** The most recent native and Aer results are already in `benchmarks/results/` as JSONL files (one JSON object per line per case). Read the latest native JSONL and the pinned `benchmarks/results/aer-reference.jsonl` to understand current performance before doing anything else. Running a full benchmark takes 10+ minutes — don't waste that time until you have a change to measure.
-
-Use `bench-trace` to identify actual bottlenecks before guessing. Be deliberate about what you profile — a cached call measures different things than a cold call.
+Use `bench-trace` only when you need to go deeper on a specific bottleneck:
 
 ```bash
-# Profile a specific case at a specific shot count
 uv run bench-trace <case_name> <shots>
-
-# Examples:
-uv run bench-trace random_universal_14 1000
-uv run bench-trace adaptive_feedback_5q 10000
-
-# Smaller trace files (no stack traces):
-uv run bench-trace random_universal_14 1000 --no-stack
+uv run bench-trace random_universal_14 10000
+uv run bench-trace random_universal_14 10000 --no-stack  # smaller trace
 ```
 
-Output: a `torch.profiler` table (top 20 ops by CPU time) printed to stdout, plus a Chrome/Perfetto trace JSON at `benchmarks/results/trace_<case>_<shots>.json`. Open traces at `chrome://tracing` or `https://ui.perfetto.dev`.
+If 3+ consecutive experiments are discarded, stop and research before the next attempt. Use web search for papers and techniques, study other simulators, question fundamental assumptions.
 
 ### 2. Hypothesize
 
-Before writing any code, state:
+Before writing code, state:
 - **What** you're changing
-- **Why** you expect it to help (with evidence — profiling, measurement, or architectural reasoning)
+- **Why** you expect it to help (with evidence)
 - **Which circuit families** should improve (not just one case)
-- **What could go wrong** (correctness risk, regression on other families)
+- **What could go wrong**
 
-A hypothesis doesn't have to come from the profiler. It can come from rethinking the architecture, studying other simulators, or questioning a fundamental assumption. The best hypotheses often eliminate work entirely rather than making existing work faster.
-
-### 2b. Research
-
-Before implementing, use external sources to inform your approach. The goal is not just to match SOTA but to surpass it — look for techniques that haven't been tried yet. Use DeepWiki to query open-source codebases, web search for papers and documentation, and WebFetch to read specific sources.
+The best hypotheses eliminate work entirely rather than making existing work faster.
 
 ### 3. Implement
 
@@ -74,77 +71,58 @@ Edit `src/quantum/system.py` and/or `src/quantum/gates.py`. Priorities:
 
 ### 4. Commit
 
-Always commit **before** running benchmarks. This creates a 1:1 mapping between code states and benchmark artifacts for reproducibility and bisection.
+Always commit **before** running benchmarks. This is your revert point if the experiment fails.
 
 ### 5. Benchmark
 
 ```bash
-# Full suite with per-case detail (primary command)
-uv run bench -v
+# Full suite — redirect output to keep context clean
+uv run bench -v > run.log 2>&1
 
-# Run specific cases only (for quick iteration during development)
-uv run bench -v --cases real_grovers qft adaptive_feedback_5q
+# Read the results
+grep "TOTAL\|cases_complete\|FAIL" run.log
 ```
 
-`--backend` defaults to `native`. In the optimization loop, do not run `--backend aer`; use the pinned Aer reference JSONL during analysis instead.
+The harness runs each circuit at 10K shots and measures wall time. Cases exceeding `--timeout` seconds (default 30) are aborted and excluded from totals. Results are written incrementally to `benchmarks/results/<timestamp>.jsonl`.
 
-The harness runs each circuit twice:
-- **cold @1K** — compilation cache cleared before this call. Measures full cold-start cost (any preprocessing + execution + sampling at 1000 shots).
-- **warm @10K** — reuses cached state from the cold call. Measures pure execution + sampling throughput at 10000 shots.
+Do not run `--backend aer`. The pinned `benchmarks/results/aer-reference.jsonl` is the fixed reference.
 
-Correctness is checked at @10K (highest shot count). Cases are sorted by qubit count ascending (small/fast first). Each result is flushed to disk immediately for crash resilience.
+### 6. Record
 
-Cases exceeding `--timeout` seconds (default 30) on any shot count are aborted — remaining shots are skipped and the case is excluded from totals.
+Append a row to `results.tsv` (tab-separated). The TSV has 5 columns:
 
-**Output**:
-- Per-case: wall time (cold and warm), CPU time, ops/sec, memory, correctness, abort metadata
-- Terminal summary: totals split by cold/warm and static/dynamic, hotspot analysis for both
-- File: `benchmarks/results/<timestamp>.jsonl`
+```
+commit	total	cases	status	description
+```
 
-### 6. Evaluate
+1. git commit hash (short, 7 chars)
+2. total wall time in seconds for complete cases (e.g. `12.34`). Use `0.00` for crashes.
+3. cases complete as fraction (e.g. `241/249`). Use `0/249` for crashes.
+4. status: `keep`, `discard`, or `crash`
+5. short description of what was tried
 
-Compare the new run against the prior baseline:
-- **Correctness**: all complete cases must PASS. Any correctness failure (FAIL) is a hard blocker — revert immediately. Aborted cases (OOM or timeout) are not failures; they're excluded from totals and don't cause exit code 1. However, the long-term goal is **zero aborted cases** — every case should complete within the timeout. If a previously-passing case now gets aborted, that's a performance regression.
-- **Cases complete**: compare against the prior run's `cases_complete` count. More complete cases = progress. Fewer = regression.
-- **Head-to-head vs Aer (hero metric)**: compare the latest native JSONL against the pinned Aer reference JSONL. Compute per-cell ratio `aer_runtime / native_runtime` for each `(case, shot_count)` cell. Aggregate with geometric mean by shot and overall. Values `>1` mean native is faster. For aborted/missing cells, use timeout-censoring at the run timeout (default 30s) so aborts are penalized instead of silently dropped.
-- **Coverage**: track the fraction of cases with a concrete runtime at each shot count for each backend. Higher coverage means fewer aborts/timeouts.
+### 7. Decide
 
-### 7. Record
+- **Any correctness FAIL** → discard, `git reset --hard HEAD~1`
+- **Previously-completing case now aborts** → treat as regression, likely discard
+- Otherwise, use your judgment. Consider the total time, cases complete, and what the change does to the architecture. A small improvement that adds ugly complexity is not worth it. Removing something and getting equal or better results is a great outcome — that's a simplification win.
 
-After each optimization iteration, update the artifacts that drive decisions:
+If you discard: `git reset --hard HEAD~1` and iterate.
+If you keep: the branch advances and you iterate.
 
-**a) Experiment log** — append a row to `docs/experiment-log.md` matching the existing table format. Include: idx (next sequential), commit hash, what changed, result metrics, verdict. The result metrics are cold @1K total and warm @10K total for complete cases.
+**NEVER STOP.** Once the loop begins, do not pause to ask if you should continue. The human may be asleep. If you run out of ideas, think harder — re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you.
 
-**b) Native vs Aer comparison graphic** — generate `docs/native-vs-aer.png` with the committed tool:
-1. Run:
-   - `uv run bench-heatmap`
-2. Optional explicit inputs:
-   - `uv run bench-heatmap --native benchmarks/results/<native>.jsonl --reference benchmarks/results/aer-reference.jsonl --output docs/native-vs-aer.png --timeout 30`
-3. The generator enforces comparison policy:
-   - **Always include all test cases** (full case union plus expected-case coverage).
-   - **Any aborted/missing cell and any runtime >= timeout** is treated as a fail and plotted at timeout (`30s` by default), for both backends.
-   - Plot type is a **single timeout-parity scatter**:
-     - x = Aer runtime, y = native runtime, log-log axes.
-     - parity line `y=x`.
-     - timeout boundaries at `x=30`, `y=30`.
-   - Marker semantics:
-     - color = qubit bucket (`<=8`, `9-16`, `17-24`, `25-30+`),
-     - shape = status (`both complete`, `native fail`, `Aer fail`, `both fail`),
-     - size = shot row (cold @1K vs warm @10K).
-4. Read the generated image and confirm it renders correctly.
-5. Only refresh the pinned Aer JSONL in a separate maintenance pass (e.g., benchmark suite/harness/environment change), not during normal optimization iterations.
+## Aer comparison (on request)
 
-**c) Progress chart** — `docs/progress-data.md` tracks cold and warm totals across optimization checkpoints.
+The native-vs-Aer scatter plot is not part of the loop. Generate it when the human asks, or after a significant milestone:
 
-## Interpreting results
+```bash
+uv run bench-heatmap
+# or explicitly:
+uv run bench-heatmap --native benchmarks/results/<latest>.jsonl --reference benchmarks/results/aer-reference.jsonl --output docs/native-vs-aer.png --timeout 30
+```
 
-The benchmark measures two distinct things per circuit:
-- **Cold @1K**: end-to-end latency including any preprocessing, first compilation, and execution. This is what a user experiences the first time they run a circuit.
-- **Warm @10K**: throughput after the first call. This is what a user experiences on repeated calls or parameter sweeps.
-
-Both matter. Cold performance determines interactive responsiveness. Warm performance determines batch throughput.
-
-**Abort handling**: Cases that OOM or exceed `--timeout` at any shot count break out early. Aborted cases are excluded from totals — only cases completing both shot counts are summed. Results are written incrementally to JSONL, so even if a large case causes an OS-level kill (exit 137), all prior results are preserved.
+Read the generated image and confirm it renders correctly.
 
 ## Key files
 
@@ -155,17 +133,16 @@ Both matter. Cold performance determines interactive responsiveness. Warm perfor
 | `src/quantum/qasm.py` | QASM 2.0 parser |
 | `benchmarks/run.py` | Benchmark harness (`bench`) |
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
-| `benchmarks/cases/` | Hand-coded benchmark case definitions — do not modify |
+| `benchmarks/cases/` | Benchmark case definitions — do not modify |
 | `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
 | `benchmarks/expected/` | Expected distributions from Aer |
-| `benchmarks/generate_circuits.py` | QASM circuit generator |
-| `benchmarks/generate_expected.py` | Expected distribution generator (via Aer) |
-| `docs/experiment-log.md` | Experiment log (what was tried, what worked, what didn't) |
-| `docs/native-vs-aer.png` | Native-vs-Aer heatmap comparison |
-| `docs/progress-data.md` | Full-suite progress chart data |
+| `results.tsv` | Experiment log — created per run, not committed |
+| `docs/native-vs-aer.png` | Aer comparison scatter (generated on request) |
 
 ## Anti-patterns
 
-- **Benchmark hacking**: special-casing code for a specific test case name, structure, or output distribution. The benchmark is a proxy for general performance, not the goal. If an optimization only helps circuits with sparse outputs (few distinct measurement outcomes), it's not helping real-world quantum circuits.
-- **Regressing correctness**: never trade correctness for speed. The tolerance check is the hard gate.
-- **Complexity without payoff**: if an optimization adds significant code complexity for <5% broad improvement, it's probably not worth it.
+- **Benchmark hacking**: special-casing code for a specific test case name, structure, or output distribution. If an optimization only helps circuits with sparse outputs, it's not helping real-world circuits.
+- **Result caching**: caching output distributions, CDFs, or any simulation results between calls. The simulator must compute from scratch each time. Compile-time preprocessing (gate fusion, circuit simplification) is fine — runtime result caching is not.
+- **Regressing correctness**: never trade correctness for speed.
+- **Complexity without payoff**: if an optimization adds significant code complexity for <5% broad improvement, it's probably not worth it. Conversely, simplifying code while maintaining performance is always a win.
+- **Re-trying failed ideas**: read `results.tsv` before hypothesizing. If something was tried and discarded, don't try it again unless you have a specific reason it would work differently now.

@@ -76,7 +76,7 @@ class AerAdapter(BackendAdapter):
 
     def _append_gate(self, circuit: Any, qubits: list[Any], op: IRGate) -> Any:
         assert self._Operator is not None
-        matrix = np.asarray(op.tensor.detach().cpu().numpy(), dtype=np.complex128)
+        matrix = np.asarray(op.tensor, dtype=np.complex128)
         matrix = self._to_qiskit_endianness(matrix)
         gate_op = self._Operator(matrix)
         return circuit.unitary(gate_op, [qubits[t] for t in op.targets])

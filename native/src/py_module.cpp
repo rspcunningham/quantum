@@ -11,7 +11,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -29,15 +31,39 @@ constexpr int32_t kOpcodePermFull = 4;
 constexpr int32_t kOpcodeDense = 5;
 constexpr int32_t kOpcodeMonomialStream = 6;
 
-constexpr int32_t kCanonicalKindDiagonal = 1;
-constexpr int32_t kCanonicalKindPermutation = 2;
-constexpr int32_t kCanonicalKindDense = 3;
 constexpr int32_t kMaxDenseArity = 6;
-constexpr uint32_t kPackedStaticAbiMagic = 0x31505351U;   // "QSP1"
-constexpr uint32_t kPackedStaticAbiVersion = 1U;
 
 constexpr float kAbsTol = 1e-6f;
 constexpr float kRelTol = 1e-5f;
+
+// ---------------------------------------------------------------------------
+// Gate kind enum — matches Python-side constants in gates.py
+// ---------------------------------------------------------------------------
+
+enum class GateKind : int32_t {
+    I = 0,
+    H = 1,
+    X = 2,
+    Y = 3,
+    Z = 4,
+    S = 5,
+    Sdg = 6,
+    T = 7,
+    Tdg = 8,
+    SX = 9,
+    RX = 10,
+    RY = 11,
+    RZ = 12,
+    CX = 13,
+    CZ = 14,
+    CCX = 15,
+    SWAP = 16,
+    CP = 17,
+};
+
+// ---------------------------------------------------------------------------
+// Internal structures
+// ---------------------------------------------------------------------------
 
 struct PairHash {
     std::size_t operator()(const std::pair<int32_t, int32_t>& value) const noexcept {
@@ -107,62 +133,154 @@ struct MonomialSpec {
     std::vector<MonomialGate> gates;
 };
 
+// ---------------------------------------------------------------------------
+// Pybind11-exposed types
+// ---------------------------------------------------------------------------
+
+struct NativeGate {
+    LocalOp op;
+};
+
+struct NativeMeasurement {
+    int32_t qubit;
+    int32_t bit;
+};
+
+struct NativeConditionalGate {
+    NativeGate gate;
+    int32_t condition;
+};
+
+// ---------------------------------------------------------------------------
+// Gate factory
+// ---------------------------------------------------------------------------
+
+LocalOp make_gate_op(int32_t kind, const std::vector<int32_t>& targets, float param) {
+    LocalOp op;
+    op.targets = targets;
+
+    static const float INV_SQRT2 = 1.0f / std::sqrt(2.0f);
+
+    switch (static_cast<GateKind>(kind)) {
+    case GateKind::I:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {1, 0}};
+        break;
+
+    case GateKind::H:
+        op.kind = LocalKind::Dense;
+        op.dense = {{INV_SQRT2, 0}, {INV_SQRT2, 0}, {INV_SQRT2, 0}, {-INV_SQRT2, 0}};
+        break;
+
+    case GateKind::X:
+        op.kind = LocalKind::Permutation;
+        op.permutation = {1, 0};
+        break;
+
+    case GateKind::Y:
+        op.kind = LocalKind::Permutation;
+        op.permutation = {1, 0};
+        op.phase = {{0, -1}, {0, 1}};
+        break;
+
+    case GateKind::Z:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {-1, 0}};
+        break;
+
+    case GateKind::S:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {0, 1}};
+        break;
+
+    case GateKind::Sdg:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {0, -1}};
+        break;
+
+    case GateKind::T:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {INV_SQRT2, INV_SQRT2}};
+        break;
+
+    case GateKind::Tdg:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {INV_SQRT2, -INV_SQRT2}};
+        break;
+
+    case GateKind::SX:
+        op.kind = LocalKind::Dense;
+        op.dense = {{0.5f, 0.5f}, {0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f}};
+        break;
+
+    case GateKind::RX: {
+        const float c = std::cos(param / 2.0f);
+        const float s = std::sin(param / 2.0f);
+        op.kind = LocalKind::Dense;
+        op.dense = {{c, 0}, {0, -s}, {0, -s}, {c, 0}};
+        break;
+    }
+
+    case GateKind::RY: {
+        const float c = std::cos(param / 2.0f);
+        const float s = std::sin(param / 2.0f);
+        op.kind = LocalKind::Dense;
+        op.dense = {{c, 0}, {-s, 0}, {s, 0}, {c, 0}};
+        break;
+    }
+
+    case GateKind::RZ: {
+        const float c = std::cos(param / 2.0f);
+        const float s = std::sin(param / 2.0f);
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{c, -s}, {c, s}};
+        break;
+    }
+
+    case GateKind::CX:
+        op.kind = LocalKind::Permutation;
+        op.permutation = {0, 1, 3, 2};
+        break;
+
+    case GateKind::CZ:
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {1, 0}, {1, 0}, {-1, 0}};
+        break;
+
+    case GateKind::CCX:
+        op.kind = LocalKind::Permutation;
+        op.permutation = {0, 1, 2, 3, 4, 5, 7, 6};
+        break;
+
+    case GateKind::SWAP:
+        op.kind = LocalKind::Permutation;
+        op.permutation = {0, 2, 1, 3};
+        break;
+
+    case GateKind::CP: {
+        const float c = std::cos(param);
+        const float s = std::sin(param);
+        op.kind = LocalKind::Diagonal;
+        op.diagonal = {{1, 0}, {1, 0}, {1, 0}, {c, s}};
+        break;
+    }
+
+    default:
+        throw std::runtime_error("Unknown gate kind: " + std::to_string(kind));
+    }
+
+    return op;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers used by optimization passes
+// ---------------------------------------------------------------------------
+
 template <typename T>
 void append_scalar(std::vector<uint8_t>& out, T value) {
     const std::size_t offset = out.size();
     out.resize(offset + sizeof(T));
     std::memcpy(out.data() + offset, &value, sizeof(T));
-}
-
-template <typename T>
-T read_scalar(const std::string& blob, std::size_t& cursor, const char* field_name) {
-    if (cursor + sizeof(T) > blob.size()) {
-        throw std::runtime_error(
-            std::string("Malformed packed static circuit: truncated field ") + field_name
-        );
-    }
-    T out;
-    std::memcpy(&out, blob.data() + cursor, sizeof(T));
-    cursor += sizeof(T);
-    return out;
-}
-
-template <typename T>
-std::vector<T> read_array(
-    const std::string& blob,
-    std::size_t& cursor,
-    std::size_t count,
-    const char* field_name
-) {
-    const std::size_t bytes = count * sizeof(T);
-    if (cursor + bytes > blob.size()) {
-        throw std::runtime_error(
-            std::string("Malformed packed static circuit: truncated array ") + field_name
-        );
-    }
-
-    std::vector<T> out(count);
-    if (bytes > 0) {
-        std::memcpy(out.data(), blob.data() + cursor, bytes);
-    }
-    cursor += bytes;
-    return out;
-}
-
-std::vector<std::complex<float>> read_complex_array(
-    const std::string& blob,
-    std::size_t& cursor,
-    std::size_t count,
-    const char* field_name
-) {
-    std::vector<std::complex<float>> out;
-    out.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const float re = read_scalar<float>(blob, cursor, field_name);
-        const float im = read_scalar<float>(blob, cursor, field_name);
-        out.emplace_back(re, im);
-    }
-    return out;
 }
 
 bool approx_eq(std::complex<float> a, std::complex<float> b) {
@@ -299,6 +417,10 @@ bool is_inverse_pair(const LocalOp& current, const LocalOp& previous) {
     const std::vector<std::complex<float>> product = matmul(mat_current, mat_previous, dim);
     return is_identity_matrix(product, dim);
 }
+
+// ---------------------------------------------------------------------------
+// Optimization passes
+// ---------------------------------------------------------------------------
 
 void pass_inverse_cancellation(std::vector<LocalOp>& ops) {
     if (ops.size() < 2) {
@@ -574,18 +696,9 @@ void pass_monomial_stream_packing(
     }
 }
 
-template <typename T>
-std::vector<T> vector_from_array(const py::object& obj, const char* arg_name) {
-    py::array_t<T, py::array::c_style | py::array::forcecast> arr =
-        py::array_t<T, py::array::c_style | py::array::forcecast>::ensure(obj);
-    if (!arr) {
-        throw py::type_error(std::string("Expected numeric array-like for argument: ") + arg_name);
-    }
-
-    const T* data = static_cast<const T*>(arr.data());
-    const py::ssize_t size = arr.size();
-    return std::vector<T>(data, data + size);
-}
+// ---------------------------------------------------------------------------
+// Pool helpers and lowering
+// ---------------------------------------------------------------------------
 
 std::string key_from_i32(const std::vector<int32_t>& values) {
     if (values.empty()) {
@@ -605,146 +718,6 @@ std::string key_from_complex(const std::vector<std::complex<float>>& values) {
         reinterpret_cast<const char*>(values.data()),
         values.size() * sizeof(std::complex<float>)
     );
-}
-
-std::vector<int32_t> i32_vector_from_sequence(const py::handle& obj, const char* field_name) {
-    py::sequence seq = py::reinterpret_borrow<py::sequence>(obj);
-    const py::ssize_t length = py::len(seq);
-    if (length < 0) {
-        throw std::runtime_error(std::string("Invalid sequence length for ") + field_name);
-    }
-
-    std::vector<int32_t> out;
-    out.reserve(static_cast<std::size_t>(length));
-    for (py::handle value : seq) {
-        out.push_back(py::cast<int32_t>(value));
-    }
-    return out;
-}
-
-std::vector<std::complex<float>> complex_vector_from_sequences(
-    const py::handle& re_obj,
-    const py::handle& im_obj,
-    const char* field_name
-) {
-    py::sequence re_seq = py::reinterpret_borrow<py::sequence>(re_obj);
-    py::sequence im_seq = py::reinterpret_borrow<py::sequence>(im_obj);
-    const py::ssize_t re_len = py::len(re_seq);
-    const py::ssize_t im_len = py::len(im_seq);
-    if (re_len < 0 || im_len < 0 || re_len != im_len) {
-        throw std::runtime_error(std::string("Mismatched real/imag sequence lengths for ") + field_name);
-    }
-
-    std::vector<std::complex<float>> out;
-    out.reserve(static_cast<std::size_t>(re_len));
-    for (py::ssize_t i = 0; i < re_len; ++i) {
-        out.emplace_back(
-            py::cast<float>(re_seq[static_cast<std::size_t>(i)]),
-            py::cast<float>(im_seq[static_cast<std::size_t>(i)])
-        );
-    }
-    return out;
-}
-
-bool is_circuit(const py::handle& op) {
-    return py::hasattr(op, "operations");
-}
-
-bool is_gate(const py::handle& op) {
-    return py::hasattr(op, "targets");
-}
-
-bool is_measurement(const py::handle& op) {
-    return py::hasattr(op, "qubit") && py::hasattr(op, "bit") && !py::hasattr(op, "targets");
-}
-
-bool is_conditional(const py::handle& op) {
-    return py::hasattr(op, "gate") && py::hasattr(op, "condition") && !py::hasattr(op, "targets");
-}
-
-void flatten_operations(const py::handle& op, std::vector<py::object>& out) {
-    if (is_circuit(op)) {
-        for (py::handle child : op.attr("operations")) {
-            flatten_operations(child, out);
-        }
-        return;
-    }
-    out.push_back(py::reinterpret_borrow<py::object>(op));
-}
-
-std::vector<int32_t> targets_from_gate(const py::handle& gate) {
-    if (py::hasattr(gate, "_native_targets_i32")) {
-        return vector_from_array<int32_t>(gate.attr("_native_targets_i32"), "_native_targets_i32");
-    }
-    if (py::hasattr(gate, "targets")) {
-        return i32_vector_from_sequence(gate.attr("targets"), "targets");
-    }
-    if (py::hasattr(gate, "_canonical_targets")) {
-        return i32_vector_from_sequence(gate.attr("_canonical_targets"), "_canonical_targets");
-    }
-    throw std::runtime_error("Gate missing targets");
-}
-
-LocalOp local_op_from_gate(const py::handle& gate) {
-    LocalOp op;
-    op.targets = targets_from_gate(gate);
-
-    if (!py::hasattr(gate, "_canonical_kind")) {
-        throw std::runtime_error("Gate missing canonical cache fields required by native static compiler");
-    }
-    const int32_t canonical_kind = py::cast<int32_t>(gate.attr("_canonical_kind"));
-
-    if (canonical_kind == kCanonicalKindDiagonal) {
-        op.kind = LocalKind::Diagonal;
-        if (py::hasattr(gate, "_native_coeff_c64")) {
-            op.diagonal = vector_from_array<std::complex<float>>(gate.attr("_native_coeff_c64"), "_native_coeff_c64");
-        } else {
-            op.diagonal = complex_vector_from_sequences(
-                gate.attr("_canonical_coeff_re"),
-                gate.attr("_canonical_coeff_im"),
-                "_canonical_coeff"
-            );
-        }
-        return op;
-    }
-
-    if (canonical_kind == kCanonicalKindPermutation) {
-        op.kind = LocalKind::Permutation;
-        if (py::hasattr(gate, "_native_perm_i32")) {
-            op.permutation = vector_from_array<int32_t>(gate.attr("_native_perm_i32"), "_native_perm_i32");
-        } else {
-            op.permutation = i32_vector_from_sequence(gate.attr("_canonical_perm"), "_canonical_perm");
-        }
-        if (py::hasattr(gate, "_native_aux_c64")) {
-            op.phase = vector_from_array<std::complex<float>>(gate.attr("_native_aux_c64"), "_native_aux_c64");
-        } else {
-            op.phase = complex_vector_from_sequences(
-                gate.attr("_canonical_aux_re"),
-                gate.attr("_canonical_aux_im"),
-                "_canonical_aux"
-            );
-        }
-        if (!op.phase.empty() && op.phase.size() != op.permutation.size()) {
-            throw std::runtime_error("Permutation phase length must match permutation length");
-        }
-        return op;
-    }
-
-    if (canonical_kind == kCanonicalKindDense) {
-        op.kind = LocalKind::Dense;
-        if (py::hasattr(gate, "_native_coeff_c64")) {
-            op.dense = vector_from_array<std::complex<float>>(gate.attr("_native_coeff_c64"), "_native_coeff_c64");
-        } else {
-            op.dense = complex_vector_from_sequences(
-                gate.attr("_canonical_coeff_re"),
-                gate.attr("_canonical_coeff_im"),
-                "_canonical_coeff"
-            );
-        }
-        return op;
-    }
-
-    throw std::runtime_error("Unknown canonical gate kind in native static compiler");
 }
 
 PoolOffset add_target_pool(
@@ -836,6 +809,10 @@ std::vector<uint8_t> serialize_monomial_blob(const std::vector<MonomialSpec>& sp
 
     return blob;
 }
+
+// ---------------------------------------------------------------------------
+// Compile local ops to program
+// ---------------------------------------------------------------------------
 
 std::int64_t compile_local_ops_to_program(
     std::vector<LocalOp> ops,
@@ -1028,358 +1005,394 @@ std::int64_t compile_local_ops_to_program(
     return quantum_native::compile_static_program(data);
 }
 
-std::int64_t compile_static_circuit(
-    py::object circuit,
-    int n_qubits,
-    int n_bits
-) {
-    std::vector<py::object> linear_ops;
-    linear_ops.reserve(512);
-    flatten_operations(circuit, linear_ops);
+// ---------------------------------------------------------------------------
+// Circuit extraction — walk a flat Python list of NativeGate/NativeMeasurement
+// ---------------------------------------------------------------------------
 
-    std::size_t terminal_start = linear_ops.size();
-    while (terminal_start > 0 && is_measurement(linear_ops[terminal_start - 1])) {
-        terminal_start -= 1;
-    }
+struct SegmentEntry {
+    LocalOp op;
+    int32_t condition;  // -1 = unconditional
+};
 
-    for (std::size_t i = 0; i < terminal_start; ++i) {
-        const py::handle op = linear_ops[i];
-        if (is_conditional(op) || is_measurement(op) || !is_gate(op)) {
-            throw std::runtime_error(
-                "Dynamic circuits are temporarily unsupported in static-only Metal build."
-            );
-        }
-    }
+struct DynamicSegment {
+    std::vector<SegmentEntry> entries;
+};
 
-    for (std::size_t i = terminal_start; i < linear_ops.size(); ++i) {
-        if (!is_measurement(linear_ops[i])) {
-            throw std::runtime_error(
-                "Dynamic circuits are temporarily unsupported in static-only Metal build."
-            );
-        }
-    }
+struct MidMeasurement {
+    int32_t qubit;
+    int32_t bit;
+};
 
-    std::vector<LocalOp> ops;
-    ops.reserve(terminal_start);
-    for (std::size_t i = 0; i < terminal_start; ++i) {
-        ops.push_back(local_op_from_gate(linear_ops[i]));
-    }
-
+struct DynamicCircuit {
+    int n_qubits;
+    int n_bits;
+    bool is_static;
+    std::vector<DynamicSegment> segments;
+    std::vector<MidMeasurement> measurements;  // measurements[i] is between segment[i] and segment[i+1]
     std::vector<int32_t> terminal_measurements;
-    terminal_measurements.reserve((linear_ops.size() - terminal_start) * 2);
-    for (std::size_t i = terminal_start; i < linear_ops.size(); ++i) {
-        const py::handle meas = linear_ops[i];
-        terminal_measurements.push_back(py::cast<int32_t>(meas.attr("qubit")));
-        terminal_measurements.push_back(py::cast<int32_t>(meas.attr("bit")));
+};
+
+DynamicCircuit extract_dynamic_circuit(py::list flat_ops, int n_qubits, int n_bits) {
+    const std::size_t n = flat_ops.size();
+
+    // Find terminal measurement boundary
+    std::size_t terminal_start = n;
+    while (terminal_start > 0
+           && py::isinstance<NativeMeasurement>(flat_ops[terminal_start - 1])) {
+        terminal_start--;
     }
 
-    return compile_local_ops_to_program(
-        std::move(ops),
-        std::move(terminal_measurements),
-        n_qubits,
-        n_bits
-    );
+    DynamicCircuit result;
+    result.n_qubits = n_qubits;
+    result.n_bits = n_bits;
+    result.is_static = true;
+
+    DynamicSegment current_segment;
+
+    for (std::size_t i = 0; i < terminal_start; ++i) {
+        py::handle op = flat_ops[i];
+
+        if (py::isinstance<NativeGate>(op)) {
+            current_segment.entries.push_back(
+                SegmentEntry{op.cast<NativeGate&>().op, -1}
+            );
+        } else if (py::isinstance<NativeMeasurement>(op)) {
+            // Mid-circuit measurement: close current segment, record measurement
+            result.is_static = false;
+            result.segments.push_back(std::move(current_segment));
+            current_segment = DynamicSegment{};
+            auto m = op.cast<NativeMeasurement&>();
+            result.measurements.push_back(MidMeasurement{m.qubit, m.bit});
+        } else if (py::isinstance<NativeConditionalGate>(op)) {
+            result.is_static = false;
+            auto cond = op.cast<NativeConditionalGate&>();
+            current_segment.entries.push_back(
+                SegmentEntry{cond.gate.op, cond.condition}
+            );
+        } else {
+            throw std::runtime_error("Unknown operation type in circuit");
+        }
+    }
+
+    // Last segment (gates after the last mid-circuit measurement)
+    result.segments.push_back(std::move(current_segment));
+
+    // Terminal measurements
+    result.terminal_measurements.reserve((n - terminal_start) * 2);
+    for (std::size_t i = terminal_start; i < n; ++i) {
+        if (!py::isinstance<NativeMeasurement>(flat_ops[i])) {
+            throw std::runtime_error(
+                "Non-measurement op found in terminal measurement block"
+            );
+        }
+        auto m = flat_ops[i].cast<NativeMeasurement&>();
+        result.terminal_measurements.push_back(m.qubit);
+        result.terminal_measurements.push_back(m.bit);
+    }
+
+    return result;
 }
 
-std::int64_t compile_static_canonical(
-    int n_qubits,
-    int n_bits,
-    const py::object& op_kinds_obj,
-    const py::object& op_target_offsets_obj,
-    const py::object& op_target_lens_obj,
-    const py::object& op_coeff_offsets_obj,
-    const py::object& op_coeff_lens_obj,
-    const py::object& op_aux_offsets_obj,
-    const py::object& op_aux_lens_obj,
-    const py::object& target_pool_obj,
-    const py::object& diag_re_obj,
-    const py::object& diag_im_obj,
-    const py::object& perm_pool_obj,
-    const py::object& phase_re_obj,
-    const py::object& phase_im_obj,
-    const py::object& dense_re_obj,
-    const py::object& dense_im_obj,
-    const py::object& terminal_measurements_obj
+// Resolve conditional gates for a known classical register state.
+// Unconditional gates are always included; conditional gates are included
+// only if the full classical register integer matches the condition.
+std::vector<LocalOp> resolve_segment(
+    const DynamicSegment& segment,
+    uint32_t classical_reg
 ) {
-    const std::vector<int32_t> op_kinds = vector_from_array<int32_t>(op_kinds_obj, "op_kinds");
-    const std::vector<int32_t> op_target_offsets = vector_from_array<int32_t>(op_target_offsets_obj, "op_target_offsets");
-    const std::vector<int32_t> op_target_lens = vector_from_array<int32_t>(op_target_lens_obj, "op_target_lens");
-    const std::vector<int32_t> op_coeff_offsets = vector_from_array<int32_t>(op_coeff_offsets_obj, "op_coeff_offsets");
-    const std::vector<int32_t> op_coeff_lens = vector_from_array<int32_t>(op_coeff_lens_obj, "op_coeff_lens");
-    const std::vector<int32_t> op_aux_offsets = vector_from_array<int32_t>(op_aux_offsets_obj, "op_aux_offsets");
-    const std::vector<int32_t> op_aux_lens = vector_from_array<int32_t>(op_aux_lens_obj, "op_aux_lens");
-
-    const std::vector<int32_t> target_pool = vector_from_array<int32_t>(target_pool_obj, "target_pool");
-    const std::vector<float> diag_re = vector_from_array<float>(diag_re_obj, "diag_re");
-    const std::vector<float> diag_im = vector_from_array<float>(diag_im_obj, "diag_im");
-    const std::vector<int32_t> perm_pool = vector_from_array<int32_t>(perm_pool_obj, "perm_pool");
-    const std::vector<float> phase_re = vector_from_array<float>(phase_re_obj, "phase_re");
-    const std::vector<float> phase_im = vector_from_array<float>(phase_im_obj, "phase_im");
-    const std::vector<float> dense_re = vector_from_array<float>(dense_re_obj, "dense_re");
-    const std::vector<float> dense_im = vector_from_array<float>(dense_im_obj, "dense_im");
-    std::vector<int32_t> terminal_measurements =
-        vector_from_array<int32_t>(terminal_measurements_obj, "terminal_measurements");
-
-    const std::size_t op_count = op_kinds.size();
-    if (op_target_offsets.size() != op_count
-        || op_target_lens.size() != op_count
-        || op_coeff_offsets.size() != op_count
-        || op_coeff_lens.size() != op_count
-        || op_aux_offsets.size() != op_count
-        || op_aux_lens.size() != op_count) {
-        throw std::runtime_error("Canonical op metadata arrays must have equal length");
-    }
-    if (diag_re.size() != diag_im.size()) {
-        throw std::runtime_error("diag_re/diag_im length mismatch");
-    }
-    if (phase_re.size() != phase_im.size()) {
-        throw std::runtime_error("phase_re/phase_im length mismatch");
-    }
-    if (dense_re.size() != dense_im.size()) {
-        throw std::runtime_error("dense_re/dense_im length mismatch");
-    }
-    if ((terminal_measurements.size() % 2) != 0) {
-        throw std::runtime_error("terminal_measurements must be flattened (qubit, bit) pairs");
-    }
-
-    auto validate_slice = [](int32_t offset, int32_t length, std::size_t total, const char* name) {
-        if (offset < 0 || length < 0) {
-            throw std::runtime_error(std::string(name) + " has negative offset/length");
+    std::vector<LocalOp> ops;
+    ops.reserve(segment.entries.size());
+    for (const auto& entry : segment.entries) {
+        if (entry.condition < 0) {
+            ops.push_back(entry.op);
+        } else if (static_cast<uint32_t>(entry.condition) == classical_reg) {
+            ops.push_back(entry.op);
         }
-        const std::size_t end = static_cast<std::size_t>(offset) + static_cast<std::size_t>(length);
-        if (end > total) {
-            throw std::runtime_error(std::string(name) + " slice out of bounds");
+        // else: skip (condition not met)
+    }
+    return ops;
+}
+
+// Check if two state vectors are equal within tolerance.
+bool states_equal(const float* a_re, const float* a_im,
+                  const float* b_re, const float* b_im,
+                  uint64_t dim) {
+    constexpr float tol = 1e-5f;
+    for (uint64_t i = 0; i < dim; ++i) {
+        float dr = a_re[i] - b_re[i];
+        float di = a_im[i] - b_im[i];
+        if (dr * dr + di * di > tol * tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Execute dynamic circuit via iterative branch processing with pruning.
+std::unordered_map<std::string, std::int64_t> execute_dynamic_circuit(
+    const DynamicCircuit& circuit,
+    std::int64_t num_shots,
+    std::optional<std::uint64_t> seed
+) {
+    const int n_qubits = circuit.n_qubits;
+    const int n_bits = circuit.n_bits;
+    const uint64_t dim = 1ULL << n_qubits;
+    const std::size_t bytes = static_cast<std::size_t>(dim) * sizeof(float);
+
+    const std::size_t prob_size = std::max<std::size_t>(
+        static_cast<std::size_t>(dim),
+        n_bits > 0 ? (1ULL << n_bits) : 1
+    );
+    std::vector<double> combined_probs(prob_size, 0.0);
+
+    float* scratch_re = static_cast<float*>(std::calloc(dim, sizeof(float)));
+    float* scratch_im = static_cast<float*>(std::calloc(dim, sizeof(float)));
+
+    auto run_segment = [&](std::size_t seg_idx, uint32_t classical_reg,
+                           float* state_re, float* state_im) {
+        std::vector<LocalOp> ops = resolve_segment(circuit.segments[seg_idx], classical_reg);
+        if (ops.empty()) return;
+        const std::int64_t handle = compile_local_ops_to_program(
+            std::move(ops), {}, n_qubits, 0
+        );
+        try {
+            quantum_native::execute_gates_only(
+                handle, state_re, state_im, scratch_re, scratch_im, dim
+            );
+            quantum_native::free_program(handle);
+        } catch (...) {
+            try { quantum_native::free_program(handle); } catch (...) {}
+            throw;
         }
     };
 
-    std::vector<LocalOp> ops;
-    ops.reserve(op_count);
-    for (std::size_t i = 0; i < op_count; ++i) {
-        const int32_t kind = op_kinds[i];
-        const int32_t target_offset = op_target_offsets[i];
-        const int32_t target_len = op_target_lens[i];
-        validate_slice(target_offset, target_len, target_pool.size(), "target_pool");
-
-        LocalOp op;
-        op.targets.assign(
-            target_pool.begin() + target_offset,
-            target_pool.begin() + target_offset + target_len
-        );
-
-        const int32_t coeff_offset = op_coeff_offsets[i];
-        const int32_t coeff_len = op_coeff_lens[i];
-        const int32_t aux_offset = op_aux_offsets[i];
-        const int32_t aux_len = op_aux_lens[i];
-
-        if (kind == kCanonicalKindDiagonal) {
-            validate_slice(coeff_offset, coeff_len, diag_re.size(), "diag");
-            op.kind = LocalKind::Diagonal;
-            op.diagonal.reserve(static_cast<std::size_t>(coeff_len));
-            for (int32_t j = 0; j < coeff_len; ++j) {
-                const std::size_t idx = static_cast<std::size_t>(coeff_offset + j);
-                op.diagonal.emplace_back(diag_re[idx], diag_im[idx]);
+    auto collapse = [&](float* re, float* im, int qubit, int outcome) {
+        const uint64_t bit_pos = static_cast<uint64_t>(n_qubits - 1 - qubit);
+        const uint64_t mask = 1ULL << bit_pos;
+        const uint64_t target = (outcome == 1) ? mask : 0ULL;
+        double norm_sq = 0.0;
+        for (uint64_t i = 0; i < dim; ++i) {
+            if ((i & mask) != target) {
+                re[i] = 0.0f; im[i] = 0.0f;
+            } else {
+                norm_sq += static_cast<double>(re[i]) * re[i]
+                         + static_cast<double>(im[i]) * im[i];
             }
-            ops.push_back(std::move(op));
-            continue;
         }
+        float scale = 1.0f / std::sqrt(static_cast<float>(norm_sq));
+        for (uint64_t i = 0; i < dim; ++i) {
+            re[i] *= scale; im[i] *= scale;
+        }
+    };
 
-        if (kind == kCanonicalKindPermutation) {
-            validate_slice(coeff_offset, coeff_len, perm_pool.size(), "perm_pool");
-            op.kind = LocalKind::Permutation;
-            op.permutation.assign(
-                perm_pool.begin() + coeff_offset,
-                perm_pool.begin() + coeff_offset + coeff_len
-            );
-
-            if (aux_len > 0) {
-                if (aux_offset < 0) {
-                    throw std::runtime_error("Permutation phase slice has negative offset");
+    auto accumulate_leaf = [&](const float* state_re, const float* state_im,
+                               uint32_t classical_reg, double branch_prob) {
+        const std::size_t terminal_count = circuit.terminal_measurements.size() / 2;
+        if (terminal_count == 0) {
+            for (uint64_t i = 0; i < dim; ++i) {
+                double re = state_re[i], im = state_im[i];
+                combined_probs[i] += branch_prob * (re * re + im * im);
+            }
+        } else {
+            for (uint64_t basis = 0; basis < dim; ++basis) {
+                double re = state_re[basis], im = state_im[basis];
+                double prob = re * re + im * im;
+                if (prob < 1e-15) continue;
+                uint32_t code = classical_reg;
+                for (std::size_t t = 0; t < terminal_count; ++t) {
+                    int q = circuit.terminal_measurements[t * 2 + 0];
+                    int b = circuit.terminal_measurements[t * 2 + 1];
+                    uint32_t qubit_shift = static_cast<uint32_t>(n_qubits - 1 - q);
+                    uint32_t bit_shift = static_cast<uint32_t>(n_bits - 1 - b);
+                    uint32_t measured = (static_cast<uint32_t>(basis) >> qubit_shift) & 1u;
+                    code = (code & ~(1u << bit_shift)) | (measured << bit_shift);
                 }
-                validate_slice(aux_offset, aux_len, phase_re.size(), "phase");
-                op.phase.reserve(static_cast<std::size_t>(aux_len));
-                for (int32_t j = 0; j < aux_len; ++j) {
-                    const std::size_t idx = static_cast<std::size_t>(aux_offset + j);
-                    op.phase.emplace_back(phase_re[idx], phase_im[idx]);
+                combined_probs[code] += branch_prob * prob;
+            }
+        }
+    };
+
+    // Iterative: maintain a list of active branches.
+    // Process one segment+measurement at a time across all branches.
+    struct Branch {
+        uint32_t classical_reg;
+        double prob;
+        std::vector<float> state_re;
+        std::vector<float> state_im;
+    };
+
+    // Initialize with single branch: |0...0⟩
+    std::vector<Branch> branches;
+    branches.push_back(Branch{0, 1.0, std::vector<float>(dim, 0.0f), std::vector<float>(dim, 0.0f)});
+    branches[0].state_re[0] = 1.0f;
+
+    // Process each segment + measurement.
+    // seg_already_run tracks whether we pre-executed the current segment
+    // during the previous iteration's pruning step.
+    bool seg_already_run = false;
+
+    for (std::size_t seg = 0; seg < circuit.segments.size(); ++seg) {
+        // Execute this segment for all branches (unless pre-executed by pruning)
+        if (!seg_already_run) {
+            for (auto& branch : branches) {
+                run_segment(seg, branch.classical_reg,
+                           branch.state_re.data(), branch.state_im.data());
+            }
+        }
+        seg_already_run = false;
+
+        // If there's a measurement after this segment, fork branches
+        if (seg < circuit.measurements.size()) {
+            const MidMeasurement& meas = circuit.measurements[seg];
+            const uint64_t bit_pos = static_cast<uint64_t>(n_qubits - 1 - meas.qubit);
+            const uint64_t mask = 1ULL << bit_pos;
+            const uint32_t reg_bit_shift = static_cast<uint32_t>(n_bits - 1 - meas.bit);
+
+            std::vector<Branch> next_branches;
+            next_branches.reserve(branches.size() * 2);
+
+            for (auto& branch : branches) {
+                // Compute p(outcome=0)
+                double prob_0 = 0.0;
+                for (uint64_t i = 0; i < dim; ++i) {
+                    if ((i & mask) == 0) {
+                        double re = branch.state_re[i], im = branch.state_im[i];
+                        prob_0 += re * re + im * im;
+                    }
+                }
+                double prob_1 = 1.0 - prob_0;
+
+                if (prob_0 > 1e-12) {
+                    Branch b0;
+                    b0.classical_reg = branch.classical_reg & ~(1u << reg_bit_shift);
+                    b0.prob = branch.prob * prob_0;
+                    b0.state_re = branch.state_re;  // copy
+                    b0.state_im = branch.state_im;
+                    collapse(b0.state_re.data(), b0.state_im.data(), meas.qubit, 0);
+                    next_branches.push_back(std::move(b0));
+                }
+                if (prob_1 > 1e-12) {
+                    Branch b1;
+                    b1.classical_reg = branch.classical_reg | (1u << reg_bit_shift);
+                    b1.prob = branch.prob * prob_1;
+                    b1.state_re = std::move(branch.state_re);  // move (last use)
+                    b1.state_im = std::move(branch.state_im);
+                    collapse(b1.state_re.data(), b1.state_im.data(), meas.qubit, 1);
+                    next_branches.push_back(std::move(b1));
                 }
             }
-            ops.push_back(std::move(op));
-            continue;
-        }
 
-        if (kind == kCanonicalKindDense) {
-            validate_slice(coeff_offset, coeff_len, dense_re.size(), "dense");
-            op.kind = LocalKind::Dense;
-            op.dense.reserve(static_cast<std::size_t>(coeff_len));
-            for (int32_t j = 0; j < coeff_len; ++j) {
-                const std::size_t idx = static_cast<std::size_t>(coeff_offset + j);
-                op.dense.emplace_back(dense_re[idx], dense_im[idx]);
+            // Pruning: merge branches with identical quantum states.
+            // Execute next segment first so conditionals are resolved before comparison.
+            if (seg + 1 < circuit.segments.size()) {
+                for (auto& branch : next_branches) {
+                    run_segment(seg + 1, branch.classical_reg,
+                               branch.state_re.data(), branch.state_im.data());
+                }
+
+                // Compare all pairs and merge branches with identical
+                // classical register AND quantum state.
+                std::vector<bool> merged(next_branches.size(), false);
+                for (std::size_t i = 0; i < next_branches.size(); ++i) {
+                    if (merged[i]) continue;
+                    for (std::size_t j = i + 1; j < next_branches.size(); ++j) {
+                        if (merged[j]) continue;
+                        if (next_branches[i].classical_reg == next_branches[j].classical_reg
+                            && states_equal(next_branches[i].state_re.data(),
+                                           next_branches[i].state_im.data(),
+                                           next_branches[j].state_re.data(),
+                                           next_branches[j].state_im.data(), dim)) {
+                            next_branches[i].prob += next_branches[j].prob;
+                            merged[j] = true;
+                        }
+                    }
+                }
+
+                // Remove merged branches
+                std::vector<Branch> pruned;
+                pruned.reserve(next_branches.size());
+                for (std::size_t i = 0; i < next_branches.size(); ++i) {
+                    if (!merged[i]) {
+                        pruned.push_back(std::move(next_branches[i]));
+                    }
+                }
+
+                // Mark next segment as already executed (don't skip it —
+                // we still need to process its measurement)
+                seg_already_run = true;
+                branches = std::move(pruned);
+            } else {
+                branches = std::move(next_branches);
             }
-            ops.push_back(std::move(op));
-            continue;
         }
-
-        throw std::runtime_error("Unknown canonical op kind");
+        // else: no measurement, just continue to next segment (or leaf)
     }
 
-    return compile_local_ops_to_program(
-        std::move(ops),
-        std::move(terminal_measurements),
-        n_qubits,
-        n_bits
-    );
-}
-
-std::int64_t compile_static_packed(py::bytes payload) {
-    const std::string blob = static_cast<std::string>(payload);
-    std::size_t cursor = 0;
-
-    const uint32_t magic = read_scalar<uint32_t>(blob, cursor, "magic");
-    if (magic != kPackedStaticAbiMagic) {
-        throw std::runtime_error("Unsupported packed static circuit payload (magic mismatch)");
+    // All segments processed — accumulate leaf distributions
+    for (const auto& branch : branches) {
+        accumulate_leaf(branch.state_re.data(), branch.state_im.data(),
+                       branch.classical_reg, branch.prob);
     }
 
-    const uint32_t version = read_scalar<uint32_t>(blob, cursor, "version");
-    if (version != kPackedStaticAbiVersion) {
-        throw std::runtime_error("Unsupported packed static circuit payload version");
+    std::free(scratch_re);
+    std::free(scratch_im);
+
+    // Sample num_shots from the combined probability distribution
+    const uint64_t resolved_seed = seed.value_or(static_cast<uint64_t>(std::random_device{}()));
+    std::mt19937_64 rng(resolved_seed);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+    // Build CDF
+    std::vector<double> cdf(combined_probs.size());
+    double total = 0.0;
+    for (std::size_t i = 0; i < combined_probs.size(); ++i) {
+        total += combined_probs[i];
+        cdf[i] = total;
     }
+    // Normalize
+    if (total > 0.0) {
+        for (auto& v : cdf) v /= total;
+    }
+    cdf.back() = 1.0;  // ensure last entry is exactly 1
 
-    const int32_t n_qubits = read_scalar<int32_t>(blob, cursor, "n_qubits");
-    const int32_t n_bits = read_scalar<int32_t>(blob, cursor, "n_bits");
-    const uint32_t op_count = read_scalar<uint32_t>(blob, cursor, "op_count");
-    const uint32_t terminal_pair_count = read_scalar<uint32_t>(blob, cursor, "terminal_pair_count");
-
-    std::vector<LocalOp> ops;
-    ops.reserve(static_cast<std::size_t>(op_count));
-    for (uint32_t op_idx = 0; op_idx < op_count; ++op_idx) {
-        const int32_t kind = read_scalar<int32_t>(blob, cursor, "op.kind");
-        const int32_t target_len_i32 = read_scalar<int32_t>(blob, cursor, "op.target_len");
-        const int32_t coeff_len_i32 = read_scalar<int32_t>(blob, cursor, "op.coeff_len");
-        const int32_t aux_len_i32 = read_scalar<int32_t>(blob, cursor, "op.aux_len");
-
-        if (target_len_i32 < 0 || coeff_len_i32 < 0 || aux_len_i32 < 0) {
-            throw std::runtime_error("Packed op metadata contains negative lengths");
+    // Sample
+    std::unordered_map<uint32_t, std::int64_t> code_counts;
+    for (std::int64_t s = 0; s < num_shots; ++s) {
+        double u = dist(rng);
+        auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
+        uint32_t code = static_cast<uint32_t>(std::distance(cdf.begin(), it));
+        if (code >= static_cast<uint32_t>(cdf.size())) {
+            code = static_cast<uint32_t>(cdf.size() - 1);
         }
+        code_counts[code]++;
+    }
 
-        const std::size_t target_len = static_cast<std::size_t>(target_len_i32);
-        const std::size_t coeff_len = static_cast<std::size_t>(coeff_len_i32);
-        const std::size_t aux_len = static_cast<std::size_t>(aux_len_i32);
+    // Convert to bitstring output
+    // Determine the number of output bits
+    int output_bits = n_bits;
+    if (output_bits == 0 && circuit.terminal_measurements.empty()) {
+        output_bits = n_qubits;
+    }
 
-        LocalOp op;
-        op.targets = read_array<int32_t>(blob, cursor, target_len, "op.targets");
-
-        if (kind == kCanonicalKindDiagonal) {
-            if (aux_len != 0) {
-                throw std::runtime_error("Packed diagonal op cannot carry aux payload");
+    std::unordered_map<std::string, std::int64_t> output;
+    output.reserve(code_counts.size());
+    for (const auto& entry : code_counts) {
+        std::string bits(output_bits, '0');
+        for (int b = 0; b < output_bits; ++b) {
+            if ((entry.first >> (output_bits - 1 - b)) & 1u) {
+                bits[b] = '1';
             }
-            op.kind = LocalKind::Diagonal;
-            op.diagonal = read_complex_array(blob, cursor, coeff_len, "op.diagonal_coeff");
-            ops.push_back(std::move(op));
-            continue;
         }
-
-        if (kind == kCanonicalKindPermutation) {
-            op.kind = LocalKind::Permutation;
-            op.permutation = read_array<int32_t>(blob, cursor, coeff_len, "op.permutation");
-            op.phase = read_complex_array(blob, cursor, aux_len, "op.permutation_phase");
-            if (!op.phase.empty() && op.phase.size() != op.permutation.size()) {
-                throw std::runtime_error("Permutation phase length must match permutation length");
-            }
-            ops.push_back(std::move(op));
-            continue;
-        }
-
-        if (kind == kCanonicalKindDense) {
-            if (aux_len != 0) {
-                throw std::runtime_error("Packed dense op cannot carry aux payload");
-            }
-            op.kind = LocalKind::Dense;
-            op.dense = read_complex_array(blob, cursor, coeff_len, "op.dense_coeff");
-            ops.push_back(std::move(op));
-            continue;
-        }
-
-        throw std::runtime_error("Unknown packed op kind");
+        output[bits] = entry.second;
     }
 
-    std::vector<int32_t> terminal_measurements;
-    terminal_measurements.reserve(static_cast<std::size_t>(terminal_pair_count) * 2);
-    for (uint32_t i = 0; i < terminal_pair_count; ++i) {
-        terminal_measurements.push_back(read_scalar<int32_t>(blob, cursor, "terminal.qubit"));
-        terminal_measurements.push_back(read_scalar<int32_t>(blob, cursor, "terminal.bit"));
-    }
-
-    if (cursor != blob.size()) {
-        throw std::runtime_error("Malformed packed static circuit: trailing bytes");
-    }
-
-    return compile_local_ops_to_program(
-        std::move(ops),
-        std::move(terminal_measurements),
-        n_qubits,
-        n_bits
-    );
-}
-
-std::unordered_map<std::string, std::int64_t> run_static_circuit(
-    py::object circuit,
-    int n_qubits,
-    int n_bits,
-    std::int64_t num_shots,
-    py::object seed_obj
-) {
-    std::optional<std::uint64_t> seed = std::nullopt;
-    if (!seed_obj.is_none()) {
-        seed = seed_obj.cast<std::uint64_t>();
-    }
-
-    const std::int64_t handle = compile_static_circuit(
-        std::move(circuit),
-        n_qubits,
-        n_bits
-    );
-    try {
-        auto counts = quantum_native::execute_static_program(handle, num_shots, seed);
-        quantum_native::free_program(handle);
-        return counts;
-    } catch (...) {
-        try {
-            quantum_native::free_program(handle);
-        } catch (...) {
-            // best-effort cleanup
-        }
-        throw;
-    }
-}
-
-std::unordered_map<std::string, std::int64_t> run_static_packed(
-    py::bytes payload,
-    std::int64_t num_shots,
-    py::object seed_obj
-) {
-    std::optional<std::uint64_t> seed = std::nullopt;
-    if (!seed_obj.is_none()) {
-        seed = seed_obj.cast<std::uint64_t>();
-    }
-
-    const std::int64_t handle = compile_static_packed(std::move(payload));
-    try {
-        auto counts = quantum_native::execute_static_program(handle, num_shots, seed);
-        quantum_native::free_program(handle);
-        return counts;
-    } catch (...) {
-        try {
-            quantum_native::free_program(handle);
-        } catch (...) {
-            // best-effort cleanup
-        }
-        throw;
-    }
+    return output;
 }
 
 }  // namespace
 
 PYBIND11_MODULE(quantum_native_runtime, m) {
-    m.doc() = "Native Metal runtime for quantum static execution";
+    m.doc() = "Native Metal runtime for quantum circuit simulation";
 
     m.def(
         "set_module_file_path",
@@ -1393,109 +1406,163 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
         py::arg("metallib_path")
     );
 
+    // -- Exposed types --
+
+    py::class_<NativeGate>(m, "NativeGate")
+        .def("targets", [](const NativeGate& g) -> std::vector<int32_t> {
+            return g.op.targets;
+        })
+        .def("matrix", [](const NativeGate& g) -> py::array_t<std::complex<float>> {
+            auto mat = dense_matrix(g.op);
+            const int dim = 1 << static_cast<int>(g.op.targets.size());
+            py::array_t<std::complex<float>> result({dim, dim});
+            auto buf = result.mutable_unchecked<2>();
+            for (int r = 0; r < dim; ++r) {
+                for (int c = 0; c < dim; ++c) {
+                    buf(r, c) = mat[static_cast<std::size_t>(r) * dim + c];
+                }
+            }
+            return result;
+        });
+
+    py::class_<NativeMeasurement>(m, "NativeMeasurement")
+        .def(py::init<int32_t, int32_t>(), py::arg("qubit"), py::arg("bit"))
+        .def_readonly("qubit", &NativeMeasurement::qubit)
+        .def_readonly("bit", &NativeMeasurement::bit);
+
+    py::class_<NativeConditionalGate>(m, "NativeConditionalGate")
+        .def_readonly("gate", &NativeConditionalGate::gate)
+        .def_readonly("condition", &NativeConditionalGate::condition);
+
+    // -- Gate factory --
+
     m.def(
-        "compile_static_program",
-        [](int n_qubits,
-           int n_bits,
-           const py::object& op_table,
-           const py::object& dispatch_table,
-           const py::object& target_pool,
-           const py::object& diag_re,
-           const py::object& diag_im,
-           const py::object& perm_pool,
-           const py::object& phase_re,
-           const py::object& phase_im,
-           const py::object& dense_re,
-           const py::object& dense_im,
-           py::bytes monomial_blob,
-           const py::object& terminal_measurements) {
-            quantum_native::StaticProgramData data{};
-            data.n_qubits = n_qubits;
-            data.n_bits = n_bits;
-            data.op_table = vector_from_array<std::int32_t>(op_table, "op_table");
-            data.dispatch_table = vector_from_array<std::int32_t>(dispatch_table, "dispatch_table");
-            data.target_pool = vector_from_array<std::int32_t>(target_pool, "target_pool");
-            data.diag_pool_re = vector_from_array<float>(diag_re, "diag_re");
-            data.diag_pool_im = vector_from_array<float>(diag_im, "diag_im");
-            data.perm_pool = vector_from_array<std::int32_t>(perm_pool, "perm_pool");
-            data.phase_pool_re = vector_from_array<float>(phase_re, "phase_re");
-            data.phase_pool_im = vector_from_array<float>(phase_im, "phase_im");
-            data.dense_pool_re = vector_from_array<float>(dense_re, "dense_re");
-            data.dense_pool_im = vector_from_array<float>(dense_im, "dense_im");
-            data.terminal_measurements = vector_from_array<std::int32_t>(terminal_measurements, "terminal_measurements");
-
-            std::string blob = monomial_blob;
-            data.monomial_blob.assign(blob.begin(), blob.end());
-
-            return quantum_native::compile_static_program(data);
+        "make_gate",
+        [](int32_t kind, std::vector<int32_t> targets, float param) -> NativeGate {
+            return NativeGate{make_gate_op(kind, targets, param)};
         },
-        py::arg("n_qubits"),
-        py::arg("n_bits"),
-        py::arg("op_table"),
-        py::arg("dispatch_table"),
-        py::arg("target_pool"),
-        py::arg("diag_re"),
-        py::arg("diag_im"),
-        py::arg("perm_pool"),
-        py::arg("phase_re"),
-        py::arg("phase_im"),
-        py::arg("dense_re"),
-        py::arg("dense_im"),
-        py::arg("monomial_blob"),
-        py::arg("terminal_measurements")
+        py::arg("kind"),
+        py::arg("targets"),
+        py::arg("param") = 0.0f
     );
 
     m.def(
-        "compile_static_circuit",
-        &compile_static_circuit,
-        py::arg("circuit"),
+        "make_diagonal_gate",
+        [](py::array_t<std::complex<float>, py::array::c_style | py::array::forcecast> diagonal,
+           std::vector<int32_t> targets) -> NativeGate {
+            auto buf = diagonal.unchecked<1>();
+            LocalOp op;
+            op.kind = LocalKind::Diagonal;
+            op.targets = std::move(targets);
+            op.diagonal.reserve(static_cast<std::size_t>(buf.shape(0)));
+            for (py::ssize_t i = 0; i < buf.shape(0); ++i) {
+                op.diagonal.push_back(buf(i));
+            }
+            return NativeGate{std::move(op)};
+        },
+        py::arg("diagonal"),
+        py::arg("targets")
+    );
+
+    m.def(
+        "make_dense_gate",
+        [](py::array_t<std::complex<float>, py::array::c_style | py::array::forcecast> matrix,
+           std::vector<int32_t> targets) -> NativeGate {
+            auto buf = matrix.unchecked<2>();
+            const int dim = static_cast<int>(buf.shape(0));
+            LocalOp op;
+            op.kind = LocalKind::Dense;
+            op.targets = std::move(targets);
+            op.dense.reserve(static_cast<std::size_t>(dim * dim));
+            for (int r = 0; r < dim; ++r) {
+                for (int c = 0; c < dim; ++c) {
+                    op.dense.push_back(buf(r, c));
+                }
+            }
+            return NativeGate{std::move(op)};
+        },
+        py::arg("matrix"),
+        py::arg("targets")
+    );
+
+    m.def(
+        "make_conditional",
+        [](NativeGate gate, int32_t condition) -> NativeConditionalGate {
+            return NativeConditionalGate{std::move(gate), condition};
+        },
+        py::arg("gate"),
+        py::arg("condition")
+    );
+
+    // -- Compile and execute --
+
+    m.def(
+        "compile_circuit",
+        [](py::list flat_ops, int n_qubits, int n_bits) -> std::int64_t {
+            auto circuit = extract_dynamic_circuit(flat_ops, n_qubits, n_bits);
+            if (!circuit.is_static) {
+                throw std::runtime_error(
+                    "compile_circuit does not support dynamic circuits. Use run_circuit instead."
+                );
+            }
+            // Extract ops from the single segment
+            std::vector<LocalOp> ops;
+            for (auto& entry : circuit.segments[0].entries) {
+                ops.push_back(std::move(entry.op));
+            }
+            return compile_local_ops_to_program(
+                std::move(ops),
+                std::move(circuit.terminal_measurements),
+                n_qubits,
+                n_bits
+            );
+        },
+        py::arg("flat_ops"),
         py::arg("n_qubits"),
         py::arg("n_bits")
     );
 
     m.def(
-        "run_static_circuit",
-        &run_static_circuit,
-        py::arg("circuit"),
+        "run_circuit",
+        [](py::list flat_ops, int n_qubits, int n_bits,
+           std::int64_t num_shots, py::object seed_obj)
+            -> std::unordered_map<std::string, std::int64_t>
+        {
+            std::optional<std::uint64_t> seed = std::nullopt;
+            if (!seed_obj.is_none()) {
+                seed = seed_obj.cast<std::uint64_t>();
+            }
+
+            auto circuit = extract_dynamic_circuit(flat_ops, n_qubits, n_bits);
+
+            if (circuit.is_static) {
+                // Static fast path — same as before
+                std::vector<LocalOp> ops;
+                for (auto& entry : circuit.segments[0].entries) {
+                    ops.push_back(std::move(entry.op));
+                }
+                const std::int64_t handle = compile_local_ops_to_program(
+                    std::move(ops),
+                    std::move(circuit.terminal_measurements),
+                    n_qubits,
+                    n_bits
+                );
+                try {
+                    auto counts = quantum_native::execute_static_program(handle, num_shots, seed);
+                    quantum_native::free_program(handle);
+                    return counts;
+                } catch (...) {
+                    try { quantum_native::free_program(handle); } catch (...) {}
+                    throw;
+                }
+            }
+
+            // Dynamic path — branch tree execution
+            return execute_dynamic_circuit(circuit, num_shots, seed);
+        },
+        py::arg("flat_ops"),
         py::arg("n_qubits"),
         py::arg("n_bits"),
-        py::arg("num_shots"),
-        py::arg("seed") = py::none()
-    );
-
-    m.def(
-        "compile_static_canonical",
-        &compile_static_canonical,
-        py::arg("n_qubits"),
-        py::arg("n_bits"),
-        py::arg("op_kinds"),
-        py::arg("op_target_offsets"),
-        py::arg("op_target_lens"),
-        py::arg("op_coeff_offsets"),
-        py::arg("op_coeff_lens"),
-        py::arg("op_aux_offsets"),
-        py::arg("op_aux_lens"),
-        py::arg("target_pool"),
-        py::arg("diag_re"),
-        py::arg("diag_im"),
-        py::arg("perm_pool"),
-        py::arg("phase_re"),
-        py::arg("phase_im"),
-        py::arg("dense_re"),
-        py::arg("dense_im"),
-        py::arg("terminal_measurements")
-    );
-
-    m.def(
-        "compile_static_packed",
-        &compile_static_packed,
-        py::arg("payload")
-    );
-
-    m.def(
-        "run_static_packed",
-        &run_static_packed,
-        py::arg("payload"),
         py::arg("num_shots"),
         py::arg("seed") = py::none()
     );

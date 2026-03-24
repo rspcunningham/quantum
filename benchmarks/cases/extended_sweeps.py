@@ -1,10 +1,5 @@
 """Extended benchmark sweeps for higher qubit counts and deeper circuits."""
 
-import cmath
-import math
-
-import torch
-
 from quantum import (
     Circuit,
     QuantumRegister,
@@ -13,13 +8,13 @@ from quantum import (
     CX,
     CCX,
     RZ,
-    GateType,
-    ControlledGateType,
+    CP,
     Measurement,
     measure_all,
     registers,
 )
 from benchmarks.cases import BenchmarkCase
+from benchmarks.cases.qft import build_qft, build_inverse_qft
 
 
 def _ghz_case(n_qubits: int, *, name: str) -> BenchmarkCase:
@@ -35,38 +30,9 @@ def _ghz_case(n_qubits: int, *, name: str) -> BenchmarkCase:
     )
 
 
-def _phase_gate(phi: float) -> GateType:
-    matrix = torch.tensor([[1, 0], [0, cmath.exp(1j * phi)]], dtype=torch.complex64)
-    return GateType(matrix)
-
-
-def _build_qft(qr: QuantumRegister, n: int) -> Circuit:
-    ops = []
-    for i in range(n):
-        ops.append(H(qr[i]))
-        for j in range(i + 1, n):
-            k = j - i + 1
-            phi = 2 * math.pi / (1 << k)
-            cp = ControlledGateType(_phase_gate(phi))
-            ops.append(cp(qr[j], qr[i]))
-    return Circuit(ops)
-
-
-def _build_inverse_qft(qr: QuantumRegister, n: int) -> Circuit:
-    ops = []
-    for i in range(n - 1, -1, -1):
-        for j in range(n - 1, i, -1):
-            k = j - i + 1
-            phi = -2 * math.pi / (1 << k)
-            cp = ControlledGateType(_phase_gate(phi))
-            ops.append(cp(qr[j], qr[i]))
-        ops.append(H(qr[i]))
-    return Circuit(ops)
-
-
 def _qft_roundtrip_case(n_qubits: int, *, name: str) -> BenchmarkCase:
     qr = QuantumRegister(n_qubits)
-    circuit = _build_qft(qr, n_qubits) + _build_inverse_qft(qr, n_qubits) + measure_all(qr)
+    circuit = build_qft(qr, n_qubits) + build_inverse_qft(qr, n_qubits) + measure_all(qr)
     return BenchmarkCase(
         name=name,
         circuit=circuit,
@@ -86,13 +52,11 @@ def _phase_ladder(qr: QuantumRegister, n_qubits: int, n_layers: int, *, sign: fl
 
         for q in range(n_qubits - 1):
             angle = sign * (0.015 * (layer + 1) * (q + 1))
-            cp = ControlledGateType(_phase_gate(angle))
-            ops.append(cp(qr[q], qr[q + 1]))
+            ops.append(CP(angle)(qr[q], qr[q + 1]))
 
         for q in range(n_qubits - 3):
             angle = sign * (0.009 * (layer + 1) * (q + 1))
-            cp = ControlledGateType(_phase_gate(angle))
-            ops.append(cp(qr[q], qr[q + 3]))
+            ops.append(CP(angle)(qr[q], qr[q + 3]))
 
     return Circuit(ops)
 

@@ -6,11 +6,12 @@ import math
 import re
 from dataclasses import dataclass
 
-import torch
+import numpy as np
 
 from quantum.gates import (
-    Circuit, Gate, GateType, Measurement, ConditionalGate,
-    H, X, Y, Z, S, T, CX, CCX, RX, RY, RZ,
+    Circuit, Gate, CustomGateType, Measurement, ConditionalGate,
+    H, X, Y, Z, S, Sdg, T, Tdg, SX, CX, CZ, CCX, SWAP, CP,
+    RX, RY, RZ,
 )
 
 
@@ -19,19 +20,6 @@ class ParsedCircuit:
     circuit: Circuit
     n_qubits: int
     n_bits: int
-
-
-# Pre-built gate types for non-standard-library gates
-_Sdg = GateType(diagonal=torch.tensor([1, -1j], dtype=torch.complex64))
-_Tdg = GateType(diagonal=torch.tensor([1, (1 - 1j) / math.sqrt(2)], dtype=torch.complex64))
-_CZ = GateType(diagonal=torch.tensor([1, 1, 1, -1], dtype=torch.complex64))
-_SWAP = GateType(torch.tensor(
-    [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
-    dtype=torch.complex64,
-))
-_SX = GateType(torch.tensor(
-    [[1 + 1j, 1 - 1j], [1 - 1j, 1 + 1j]], dtype=torch.complex64,
-) / 2)
 
 
 def _eval_param(expr: str) -> float:
@@ -75,51 +63,46 @@ def _safe_eval(node: ast.expr) -> float:
     raise ValueError(f"Unsupported AST node: {ast.dump(node)}")
 
 
-def _make_u3(theta: float, phi: float, lam: float) -> GateType:
+def _make_u3(theta: float, phi: float, lam: float) -> CustomGateType:
     ct, st = math.cos(theta / 2), math.sin(theta / 2)
-    return GateType(torch.tensor([
+    return CustomGateType(np.array([
         [ct, -complex(math.cos(lam), math.sin(lam)) * st],
         [complex(math.cos(phi), math.sin(phi)) * st,
          complex(math.cos(phi + lam), math.sin(phi + lam)) * ct],
-    ], dtype=torch.complex64))
+    ], dtype=np.complex64))
 
 
-def _make_u1(lam: float) -> GateType:
-    return GateType(diagonal=torch.tensor(
-        [1, complex(math.cos(lam), math.sin(lam))], dtype=torch.complex64))
+def _make_u1(lam: float) -> CustomGateType:
+    return CustomGateType(diagonal=np.array(
+        [1, complex(math.cos(lam), math.sin(lam))], dtype=np.complex64))
 
 
-def _make_cp(lam: float) -> GateType:
-    return GateType(diagonal=torch.tensor(
-        [1, 1, 1, complex(math.cos(lam), math.sin(lam))], dtype=torch.complex64))
-
-
-def _make_cu3(theta: float, phi: float, lam: float) -> GateType:
+def _make_cu3(theta: float, phi: float, lam: float) -> CustomGateType:
     ct, st = math.cos(theta / 2), math.sin(theta / 2)
     u00 = complex(ct, 0)
     u01 = -complex(math.cos(lam), math.sin(lam)) * st
     u10 = complex(math.cos(phi), math.sin(phi)) * st
     u11 = complex(math.cos(phi + lam), math.sin(phi + lam)) * ct
-    return GateType(torch.tensor([
+    return CustomGateType(np.array([
         [1, 0, 0, 0], [0, 1, 0, 0],
         [0, 0, u00, u01], [0, 0, u10, u11],
-    ], dtype=torch.complex64))
+    ], dtype=np.complex64))
 
 
-def _make_rzz(theta: float) -> GateType:
+def _make_rzz(theta: float) -> CustomGateType:
     e_neg = complex(math.cos(theta / 2), -math.sin(theta / 2))
     e_pos = complex(math.cos(theta / 2), math.sin(theta / 2))
-    return GateType(diagonal=torch.tensor([e_neg, e_pos, e_pos, e_neg], dtype=torch.complex64))
+    return CustomGateType(diagonal=np.array([e_neg, e_pos, e_pos, e_neg], dtype=np.complex64))
 
 
-def _make_rxx(theta: float) -> GateType:
+def _make_rxx(theta: float) -> CustomGateType:
     c, s = math.cos(theta / 2), math.sin(theta / 2)
-    return GateType(torch.tensor([
+    return CustomGateType(np.array([
         [c, 0, 0, complex(0, -s)],
         [0, c, complex(0, -s), 0],
         [0, complex(0, -s), c, 0],
         [complex(0, -s), 0, 0, c],
-    ], dtype=torch.complex64))
+    ], dtype=np.complex64))
 
 
 # Regex patterns
@@ -297,11 +280,11 @@ def _make_gate(name: str, params: list[float], qubits: list[int]) -> list[Gate] 
     if name == 't':
         return [T(qubits[0])]
     if name == 'sdg':
-        return [_Sdg(qubits[0])]
+        return [Sdg(qubits[0])]
     if name == 'tdg':
-        return [_Tdg(qubits[0])]
+        return [Tdg(qubits[0])]
     if name == 'sx':
-        return [_SX(qubits[0])]
+        return [SX(qubits[0])]
     if name == 'rx':
         return [RX(params[0])(qubits[0])]
     if name == 'ry':
@@ -317,11 +300,11 @@ def _make_gate(name: str, params: list[float], qubits: list[int]) -> list[Gate] 
     if name in ('cx', 'CX'):
         return [CX(qubits[0], qubits[1])]
     if name == 'cz':
-        return [_CZ(qubits[0], qubits[1])]
+        return [CZ(qubits[0], qubits[1])]
     if name == 'swap':
-        return [_SWAP(qubits[0], qubits[1])]
+        return [SWAP(qubits[0], qubits[1])]
     if name in ('cp', 'cu1', 'cphase'):
-        return [_make_cp(params[0])(qubits[0], qubits[1])]
+        return [CP(params[0])(qubits[0], qubits[1])]
     if name == 'ccx':
         return [CCX(qubits[0], qubits[1], qubits[2])]
     if name == 'cu3':
@@ -334,15 +317,15 @@ def _make_gate(name: str, params: list[float], qubits: list[int]) -> list[Gate] 
         return [_make_cu3(math.pi, math.pi / 2, math.pi / 2)(qubits[0], qubits[1])]
     if name == 'ch':
         ct = 1 / math.sqrt(2)
-        return [GateType(torch.tensor([
+        return [CustomGateType(np.array([
             [1, 0, 0, 0], [0, 1, 0, 0],
             [0, 0, ct, ct], [0, 0, ct, -ct],
-        ], dtype=torch.complex64))(qubits[0], qubits[1])]
+        ], dtype=np.complex64))(qubits[0], qubits[1])]
     if name == 'crz':
         e_neg = complex(math.cos(params[0] / 2), -math.sin(params[0] / 2))
         e_pos = complex(math.cos(params[0] / 2), math.sin(params[0] / 2))
-        return [GateType(diagonal=torch.tensor(
-            [1, 1, e_neg, e_pos], dtype=torch.complex64))(qubits[0], qubits[1])]
+        return [CustomGateType(diagonal=np.array(
+            [1, 1, e_neg, e_pos], dtype=np.complex64))(qubits[0], qubits[1])]
     return None
 
 

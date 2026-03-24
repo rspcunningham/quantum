@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import cmath
 import math
 import random
-
-import torch
 
 from quantum import (
     Circuit,
     QuantumRegister,
-    ControlledGateType,
-    GateType,
     H,
     X,
     Y,
@@ -22,6 +17,7 @@ from quantum import (
     RZ,
     CX,
     CCX,
+    CP,
     Measurement,
     measure_all,
 )
@@ -29,11 +25,6 @@ from benchmarks.cases import BenchmarkCase
 
 
 GateDescriptor = tuple[str, tuple[int, ...], float]
-
-
-def _phase_gate(phi: float) -> GateType:
-    matrix = torch.tensor([[1, 0], [0, cmath.exp(1j * phi)]], dtype=torch.complex64)
-    return GateType(matrix)
 
 
 def _materialize_descriptors(
@@ -67,8 +58,7 @@ def _materialize_descriptors(
         elif tag == "ccx":
             ops.append(CCX(qr[qubits[0]], qr[qubits[1]], qr[qubits[2]]))
         elif tag == "cp":
-            cp = ControlledGateType(_phase_gate(angle))
-            ops.append(cp(qr[qubits[0]], qr[qubits[1]]))
+            ops.append(CP(angle)(qr[qubits[0]], qr[qubits[1]]))
         else:
             raise ValueError(f"Unsupported descriptor tag: {tag}")
 

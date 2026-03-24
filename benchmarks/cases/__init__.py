@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from collections.abc import Callable
 
-from quantum import Circuit
+from quantum import Circuit, CP
 
 
 @dataclass
@@ -83,4 +83,5 @@ CORE_CASES: list[Callable[[], BenchmarkCase]] = [
     ghz_state,
     qft,
     teleportation,
+    adaptive_feedback,
 ]

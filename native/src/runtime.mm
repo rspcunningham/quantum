@@ -1136,6 +1136,94 @@ std::unordered_map<std::string, std::int64_t> execute_static_program(
     return output;
 }
 
+StateBuffers execute_gates_only(
+    std::int64_t handle,
+    float* state_re,
+    float* state_im,
+    float* scratch_re,
+    float* scratch_im,
+    std::uint64_t dim
+) {
+    std::shared_ptr<Program> program = program_for_handle(handle);
+    RuntimeState& s = state();
+
+    if (dim == 0 || dim > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::runtime_error("State dimension exceeds native runtime limits");
+    }
+    const uint32_t dim_u32 = static_cast<uint32_t>(dim);
+    const std::size_t bytes = dim * sizeof(float);
+
+    // Allocate proper Metal buffers and copy state in
+    id<MTLBuffer> buf_a_re = [s.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_a_im = [s.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_b_re = [s.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_b_im = [s.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+
+    if (!buf_a_re || !buf_a_im || !buf_b_re || !buf_b_im) {
+        throw std::runtime_error("Failed to allocate Metal buffers for gate-only execution");
+    }
+
+    std::memcpy([buf_a_re contents], state_re, bytes);
+    std::memcpy([buf_a_im contents], state_im, bytes);
+
+    id<MTLBuffer> cur_in_re = buf_a_re;
+    id<MTLBuffer> cur_in_im = buf_a_im;
+    id<MTLBuffer> cur_out_re = buf_b_re;
+    id<MTLBuffer> cur_out_im = buf_b_im;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [s.queue commandBuffer];
+        if (cmd == nil) {
+            throw std::runtime_error("Failed to allocate Metal command buffer");
+        }
+
+        id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+        if (encoder == nil) {
+            throw std::runtime_error("Failed to allocate Metal command encoder");
+        }
+
+        bool group_common_bound = false;
+        for (const DispatchRow& dispatch : program->dispatch) {
+            if (dispatch.op_count <= 0) {
+                continue;
+            }
+            encode_dispatch_group(
+                *program,
+                dispatch,
+                dim_u32,
+                encoder,
+                cur_in_re,
+                cur_in_im,
+                cur_out_re,
+                cur_out_im,
+                group_common_bound
+            );
+            swap_state_buffers(cur_in_re, cur_in_im, cur_out_re, cur_out_im);
+        }
+
+        [encoder endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.status != MTLCommandBufferStatusCompleted) {
+            std::string err = "unknown";
+            if (cmd.error != nil && cmd.error.localizedDescription != nil) {
+                err = std::string([cmd.error.localizedDescription UTF8String]);
+            }
+            throw std::runtime_error("Metal command buffer failed in gate-only execution: " + err);
+        }
+    }
+
+    // Copy result back to caller's buffers
+    std::memcpy(state_re, [cur_in_re contents], bytes);
+    std::memcpy(state_im, [cur_in_im contents], bytes);
+
+    StateBuffers result;
+    result.re = state_re;
+    result.im = state_im;
+    return result;
+}
+
 std::unordered_map<std::string, std::int64_t> get_program_stats(std::int64_t handle) {
     std::shared_ptr<Program> program = program_for_handle(handle);
 

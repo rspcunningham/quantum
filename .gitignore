@@ -12,3 +12,10 @@ wheels/
 
 # Metal program cache artifacts
 .quantum-cache/
+
+# Optimization loop artifacts
+results.tsv
+run.log
+
+# Benchmark results
+benchmarks/results/
