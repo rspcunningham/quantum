@@ -380,9 +380,13 @@ def print_results(results: list[dict]) -> None:
             print(f"  {r['case']}: {'; '.join(r['errors'])}")
 
     complete = [r for r in results if not r["aborted"]]
+    passed = [r for r in complete if r["correct"]]
     if complete:
         total = sum(r["time_s"] for r in complete)
         print(f"\nTotal: {len(complete)}/{len(results)} cases in {total:.3f}s | Peak RSS: {get_peak_rss_mb():.0f} MB")
+
+    fail_count = len(complete) - len(passed)
+    print(f"\nSUMMARY\t{total:.2f}\t{len(complete)}/{len(results)}\t{fail_count} FAIL")
 
 
 def main() -> None:

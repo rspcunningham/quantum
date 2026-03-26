@@ -5,7 +5,9 @@ benchmarks/results/<timestamp>-aer.jsonl. Used to regenerate the
 pinned aer-reference.jsonl, not part of the optimization loop.
 """
 
+import contextlib
 import json
+import signal
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,9 +18,27 @@ from benchmarks.ir import build_circuit_ir
 from benchmarks.run import (
     SHOTS, TIMEOUT, count_ops, classify_workload, check_correctness,
     get_git_hash, get_memory_limit_gb, estimate_memory_gb, get_peak_rss_mb,
-    print_results, _time_limit, _CaseTimeout,
+    print_results,
 )
 from quantum import infer_resources
+
+
+class _CaseTimeout(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def _time_limit(seconds: int):
+    """SIGALRM timeout — works for Aer because it releases the GIL."""
+    def _raise(signum, frame):
+        raise _CaseTimeout()
+    old = signal.signal(signal.SIGALRM, _raise)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def main() -> None:

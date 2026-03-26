@@ -10,9 +10,10 @@ Think big. Read `results.tsv` to understand what's been tried, what worked, and 
 
 ## Scope
 
-- **Optimization targets**: `src/quantum/system.py` and `src/quantum/gates.py`. Do not modify benchmark cases or the user-facing API (gate constructors, `run_simulation` signature, `Circuit`/`QuantumRegister` interface).
+- **Optimization targets**: The simulation engine and native runtime. This includes `src/quantum/system.py`, `src/quantum/gates.py`, `src/quantum/metal_exec.py`, `native/src/*.cpp`, `native/src/*.mm`, `native/src/*.metal`, and `native/src/*.hpp`. Do not modify benchmark cases or the user-facing API (gate constructors, `run_simulation` signature, `Circuit`/`QuantumRegister` interface).
 - **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases. No caching of simulation results or output distributions between calls — the simulator must do the work each time.
 - **Platform constraints**: This runs on Apple Silicon (M3 Ultra, 64 GB). Solutions must be callable from Python and optimized for this hardware. How you achieve that — PyTorch, native code extensions, GPU shaders, anything — is up to you.
+- **Rebuilding**: After editing any native C++ / Objective-C / Metal source under `native/src/`, you must rebuild before benchmarking: `uv sync --reinstall-package quantum`.
 
 ## Setup
 
@@ -33,7 +34,7 @@ LOOP FOREVER:
 2. Hypothesize — state what you're changing and why
 3. Implement — edit system.py and/or gates.py
 4. Commit    — git commit (creates revert point)
-5. Benchmark — uv run bench > run.log 2>&1
+5. Benchmark — uv run bench
 6. Record    — read results, append to results.tsv
 7. Decide    — keep (advance) or discard (git reset)
 ```
@@ -81,6 +82,12 @@ uv run bench
 
 The harness runs each circuit at 10K shots and measures wall time. Cases exceeding 10 seconds are aborted (via a native Metal timeout) and excluded from totals. Results are written incrementally to `benchmarks/results/<timestamp>.jsonl` — read this file directly for per-case data.
 
+The last line of output is a machine-readable summary:
+
+```
+SUMMARY	<total_seconds>	<completed>/<total>	<fail_count> FAIL
+```
+
 To regenerate the Aer reference (not part of the loop): `uv run bench-aer`.
 
 ### 6. Record
@@ -112,15 +119,21 @@ If you keep: the branch advances and you iterate.
 
 | File | Purpose |
 |------|---------|
-| `src/quantum/system.py` | Simulation engine — the optimization target |
+| `src/quantum/system.py` | Simulation engine — Python entry point |
 | `src/quantum/gates.py` | Gate types and circuit API — internals modifiable, public API frozen |
+| `src/quantum/metal_exec.py` | Metal execution bridge — Python ↔ native |
+| `native/src/runtime.mm` | Native Metal runtime — GPU dispatch, sampling, timeout |
+| `native/src/runtime.hpp` | Native runtime header |
+| `native/src/py_module.cpp` | pybind11 bindings — circuit compilation, `run_circuit` entry |
+| `native/src/shaders.metal` | Metal GPU shaders — gate kernels, sampling, histogram |
 | `src/quantum/qasm.py` | QASM 2.0 parser |
-| `benchmarks/run.py` | Benchmark harness (`bench`) |
+| `benchmarks/run.py` | Benchmark harness (`bench`) — do not modify |
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
 | `benchmarks/run_aer.py` | Aer reference runner (`bench-aer`) — not part of the loop |
 | `benchmarks/cases/` | Benchmark case definitions — do not modify |
 | `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
 | `benchmarks/expected/` | Expected distributions from Aer |
+| `benchmarks/results/aer-reference.jsonl` | Pinned Aer timings for comparison |
 | `results.tsv` | Experiment log — created per run, not committed |
 
 ## Anti-patterns
