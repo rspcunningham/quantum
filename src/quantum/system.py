@@ -56,6 +56,7 @@ def run_simulation(
     *,
     n_qubits: int | None = None,
     n_bits: int | None = None,
+    timeout: float = 0.0,
 ) -> dict[str, int]:
     """Run a quantum circuit simulation and return measurement counts."""
     if n_qubits is None or n_bits is None:
@@ -72,4 +73,5 @@ def run_simulation(
         n_qubits=n_qubits,
         n_bits=n_bits,
         num_shots=num_shots,
+        timeout=timeout,
     )

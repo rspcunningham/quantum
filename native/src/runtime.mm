@@ -838,7 +838,8 @@ std::int64_t compile_static_program(const StaticProgramData& data) {
 std::unordered_map<std::string, std::int64_t> execute_static_program(
     std::int64_t handle,
     std::int64_t num_shots,
-    std::optional<std::uint64_t> seed
+    std::optional<std::uint64_t> seed,
+    double timeout_seconds
 ) {
     if (num_shots < 0) {
         throw std::runtime_error("num_shots must be non-negative");
@@ -1076,8 +1077,22 @@ std::unordered_map<std::string, std::int64_t> execute_static_program(
             [sampling_encoder endEncoding];
         }
 
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        if (timeout_seconds > 0.0) {
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            [cmd addCompletedHandler:^(id<MTLCommandBuffer> _) {
+                dispatch_semaphore_signal(sem);
+            }];
+            [cmd commit];
+            int64_t timeout_ns = static_cast<int64_t>(timeout_seconds * 1e9);
+            long wait_result = dispatch_semaphore_wait(
+                sem, dispatch_time(DISPATCH_TIME_NOW, timeout_ns));
+            if (wait_result != 0) {
+                throw std::runtime_error("timeout: GPU execution exceeded limit");
+            }
+        } else {
+            [cmd commit];
+            [cmd waitUntilCompleted];
+        }
 
         if (cmd.status != MTLCommandBufferStatusCompleted) {
             std::string err = "unknown";

@@ -38,7 +38,8 @@ std::int64_t compile_static_program(const StaticProgramData& data);
 std::unordered_map<std::string, std::int64_t> execute_static_program(
     std::int64_t handle,
     std::int64_t num_shots,
-    std::optional<std::uint64_t> seed
+    std::optional<std::uint64_t> seed,
+    double timeout_seconds = 0.0
 );
 
 /// Execute only the gate dispatch portion of a compiled program.

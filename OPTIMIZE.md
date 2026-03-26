@@ -12,7 +12,7 @@ Think big. Read `results.tsv` to understand what's been tried, what worked, and 
 
 - **Optimization targets**: `src/quantum/system.py` and `src/quantum/gates.py`. Do not modify benchmark cases or the user-facing API (gate constructors, `run_simulation` signature, `Circuit`/`QuantumRegister` interface).
 - **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases. No caching of simulation results or output distributions between calls — the simulator must do the work each time.
-- **Platform constraints**: This runs on Apple Silicon (M1 Max, 32 GB). Solutions must be callable from Python and optimized for this hardware. How you achieve that — PyTorch, native code extensions, GPU shaders, anything — is up to you.
+- **Platform constraints**: This runs on Apple Silicon (M3 Ultra, 64 GB). Solutions must be callable from Python and optimized for this hardware. How you achieve that — PyTorch, native code extensions, GPU shaders, anything — is up to you.
 
 ## Setup
 
@@ -33,7 +33,7 @@ LOOP FOREVER:
 2. Hypothesize — state what you're changing and why
 3. Implement — edit system.py and/or gates.py
 4. Commit    — git commit (creates revert point)
-5. Benchmark — uv run bench -v > run.log 2>&1
+5. Benchmark — uv run bench > run.log 2>&1
 6. Record    — read results, append to results.tsv
 7. Decide    — keep (advance) or discard (git reset)
 ```
@@ -76,16 +76,12 @@ Always commit **before** running benchmarks. This is your revert point if the ex
 ### 5. Benchmark
 
 ```bash
-# Full suite — redirect output to keep context clean
-uv run bench -v > run.log 2>&1
-
-# Read the results
-grep "TOTAL\|cases_complete\|FAIL" run.log
+uv run bench
 ```
 
-The harness runs each circuit at 10K shots and measures wall time. Cases exceeding `--timeout` seconds (default 30) are aborted and excluded from totals. Results are written incrementally to `benchmarks/results/<timestamp>.jsonl`.
+The harness runs each circuit at 10K shots and measures wall time. Cases exceeding 10 seconds are aborted (via a native Metal timeout) and excluded from totals. Results are written incrementally to `benchmarks/results/<timestamp>.jsonl` — read this file directly for per-case data.
 
-Do not run `--backend aer`. The pinned `benchmarks/results/aer-reference.jsonl` is the fixed reference.
+To regenerate the Aer reference (not part of the loop): `uv run bench-aer`.
 
 ### 6. Record
 
@@ -112,18 +108,6 @@ If you keep: the branch advances and you iterate.
 
 **NEVER STOP.** Once the loop begins, do not pause to ask if you should continue. The human may be asleep. If you run out of ideas, think harder — re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you.
 
-## Aer comparison (on request)
-
-The native-vs-Aer scatter plot is not part of the loop. Generate it when the human asks, or after a significant milestone:
-
-```bash
-uv run bench-heatmap
-# or explicitly:
-uv run bench-heatmap --native benchmarks/results/<latest>.jsonl --reference benchmarks/results/aer-reference.jsonl --output docs/native-vs-aer.png --timeout 30
-```
-
-Read the generated image and confirm it renders correctly.
-
 ## Key files
 
 | File | Purpose |
@@ -133,11 +117,11 @@ Read the generated image and confirm it renders correctly.
 | `src/quantum/qasm.py` | QASM 2.0 parser |
 | `benchmarks/run.py` | Benchmark harness (`bench`) |
 | `benchmarks/trace.py` | Profiler (`bench-trace`) |
+| `benchmarks/run_aer.py` | Aer reference runner (`bench-aer`) — not part of the loop |
 | `benchmarks/cases/` | Benchmark case definitions — do not modify |
 | `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
 | `benchmarks/expected/` | Expected distributions from Aer |
 | `results.tsv` | Experiment log — created per run, not committed |
-| `docs/native-vs-aer.png` | Aer comparison scatter (generated on request) |
 
 ## Anti-patterns
 

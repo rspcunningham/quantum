@@ -1,21 +1,23 @@
 """Benchmark runner for the quantum simulator."""
 
-import argparse
 import json
+import multiprocessing
 import os
+import pickle
 import resource
+import struct
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-from benchmarks.cases import BenchmarkCase, ALL_CASES, CORE_CASES
-from benchmarks.ir import build_circuit_ir
+from benchmarks.cases import BenchmarkCase, ALL_CASES
 from quantum import run_simulation, infer_resources
 from quantum.gates import Gate, Measurement, ConditionalGate, Circuit
 
 SHOTS = 10_000
+TIMEOUT = 10
 
 
 def get_git_hash() -> str:
@@ -96,9 +98,22 @@ def get_peak_rss_mb() -> float:
     return rusage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else rusage.ru_maxrss / 1024
 
 
+def _next_pow2(n: int) -> int:
+    p = 1
+    while p < n:
+        p <<= 1
+    return p
+
+
 def estimate_memory_gb(n_qubits: int) -> float:
-    """Estimate GPU memory needed: 4 Metal buffers (ping-pong re/im) + sampling."""
-    return 5 * (2 ** n_qubits) * 4 / (1024 ** 3)
+    """Estimate GPU memory needed: 4 state buffers + 2 sampling prob buffers + histogram + shots."""
+    dim = 2 ** n_qubits
+    state_bytes = dim * 4 * 4           # 4 state buffers (ping-pong re/im), float32
+    sampling_bytes = dim * 4 * 2        # 2 probability buffers (a/b), float32
+    shots_bytes = SHOTS * 4             # sampled_codes, uint32
+    hist_size = _next_pow2(max(1, SHOTS * 2))
+    hist_bytes = hist_size * 4 * 2      # keys + counts, uint32 each
+    return (state_bytes + sampling_bytes + shots_bytes + hist_bytes) / (1024 ** 3)
 
 
 def get_memory_limit_gb() -> float:
@@ -107,7 +122,176 @@ def get_memory_limit_gb() -> float:
     return total / (1024 ** 3) / 2
 
 
-def run_case(case: BenchmarkCase, git_hash: str, *, backend: str, timeout: float, memory_limit_gb: float) -> dict:
+# ---------------------------------------------------------------------------
+# Long-lived worker subprocess
+#
+# Spawned once. Receives (circuit, n_qubits, shots, timeout) over stdin,
+# calls run_simulation with the native C++ timeout, sends back the result.
+# On timeout the C++ layer throws immediately; the worker exits so the
+# parent can spawn a fresh one with a clean Metal context.
+# ---------------------------------------------------------------------------
+
+_WORKER_SCRIPT = """\
+import pickle, struct, sys, time, os
+
+# Import only the simulator — not benchmarks.
+from quantum import run_simulation
+
+stdin = sys.stdin.buffer
+stdout = sys.stdout.buffer
+
+# Signal ready.
+stdout.write(b"R")
+stdout.flush()
+
+while True:
+    hdr = stdin.read(4)
+    if len(hdr) < 4:
+        break
+    length = struct.unpack(">I", hdr)[0]
+    payload = stdin.read(length)
+    if len(payload) < length:
+        break
+    circuit, n_qubits, shots, timeout = pickle.loads(payload)
+    error = None
+    wall = 0.0
+    cpu = 0.0
+    result = None
+    gpu_timeout = False
+    try:
+        t0 = time.perf_counter()
+        c0 = time.process_time()
+        result = run_simulation(circuit, shots, n_qubits=n_qubits, timeout=timeout)
+        wall = time.perf_counter() - t0
+        cpu = time.process_time() - c0
+    except Exception as e:
+        wall = time.perf_counter() - t0
+        cpu = time.process_time() - c0
+        error = str(e).strip()
+        if "timeout" in error.lower():
+            gpu_timeout = True
+    resp = pickle.dumps({"result": result, "wall": wall, "cpu": cpu,
+                         "error": error, "gpu_timeout": gpu_timeout})
+    stdout.write(struct.pack(">I", len(resp)))
+    stdout.write(resp)
+    stdout.flush()
+    if gpu_timeout:
+        # GPU work is still in flight — exit cleanly so the OS does
+        # orderly Metal teardown before the parent spawns a fresh worker.
+        break
+"""
+
+
+def _send(pipe, obj):
+    data = pickle.dumps(obj)
+    os.write(pipe, struct.pack(">I", len(data)) + data)
+
+
+def _recv(pipe, deadline):
+    """Read a length-prefixed pickle from a raw fd, respecting deadline."""
+    import select
+
+    def _read_exact(n):
+        buf = bytearray()
+        while len(buf) < n:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            ready, _, _ = select.select([pipe], [], [], remaining)
+            if not ready:
+                return None
+            chunk = os.read(pipe, n - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    hdr = _read_exact(4)
+    if hdr is None:
+        return None
+    length = struct.unpack(">I", hdr)[0]
+    payload = _read_exact(length)
+    if payload is None:
+        return None
+    return pickle.loads(payload)
+
+
+class _Worker:
+    def __init__(self):
+        self._proc = None
+        self._stdin_fd = None
+        self._stdout_fd = None
+
+    def _spawn(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", _WORKER_SCRIPT],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        # Wait for ready signal.
+        ready = proc.stdout.read(1)
+        if ready != b"R":
+            proc.kill()
+            proc.wait()
+            raise RuntimeError("worker failed to start")
+        self._proc = proc
+        self._stdin_fd = proc.stdin.fileno()
+        self._stdout_fd = proc.stdout.fileno()
+
+    def _ensure(self):
+        if self._proc is None or self._proc.poll() is not None:
+            self._spawn()
+
+    def _kill(self):
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.kill()
+            self._proc.wait()
+        self._proc = None
+        self._stdin_fd = None
+        self._stdout_fd = None
+
+    def run(self, circuit, n_qubits, shots, timeout):
+        self._ensure()
+        try:
+            _send(self._stdin_fd, (circuit, n_qubits, shots, timeout))
+        except OSError:
+            self._proc = None
+            raise RuntimeError("worker died before receiving task")
+
+        # Give the worker timeout + generous margin for pickle overhead.
+        deadline = time.monotonic() + timeout + 5.0
+        resp = _recv(self._stdout_fd, deadline)
+
+        if resp is None:
+            # Worker died or hung beyond the margin — force kill.
+            self._kill()
+            return {"result": None, "wall": timeout, "cpu": 0.0,
+                    "error": f"timeout: killed after {timeout}s", "gpu_timeout": True}
+
+        if resp.get("gpu_timeout"):
+            # Worker is exiting on its own — wait for clean shutdown.
+            self._proc.wait(timeout=5)
+            self._proc = None
+            self._stdin_fd = None
+            self._stdout_fd = None
+
+        return resp
+
+    def close(self):
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.stdin.close()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+        self._proc = None
+        self._stdin_fd = None
+        self._stdout_fd = None
+
+
+def run_case(case: BenchmarkCase, git_hash: str, *, memory_limit_gb: float, worker: _Worker) -> dict:
     n_qubits = case.n_qubits
     if n_qubits is None:
         n_qubits = infer_resources(case.circuit)[0]
@@ -123,36 +307,14 @@ def run_case(case: BenchmarkCase, git_hash: str, *, backend: str, timeout: float
     estimated_gb = estimate_memory_gb(n_qubits)
     if estimated_gb > memory_limit_gb:
         abort_reason = f"skipped: {estimated_gb:.1f} GB estimated > {memory_limit_gb:.1f} GB limit ({n_qubits} qubits)"
-    elif backend == "native":
-        try:
-            wall_start = time.perf_counter()
-            cpu_start = time.process_time()
-            result = run_simulation(case.circuit, SHOTS, n_qubits=case.n_qubits)
-            wall_elapsed = time.perf_counter() - wall_start
-            cpu_elapsed = time.process_time() - cpu_start
-        except Exception as error:
-            abort_reason = str(error).strip()
     else:
-        from benchmarks.backends.aer_adapter import AerAdapter
-        aer = AerAdapter()
-        avail = aer.availability()
-        if not avail.available:
-            abort_reason = f"aer unavailable: {avail.reason}"
+        resp = worker.run(case.circuit, n_qubits, SHOTS, TIMEOUT)
+        wall_elapsed = resp["wall"]
+        cpu_elapsed = resp["cpu"]
+        if resp["error"] is not None:
+            abort_reason = resp["error"]
         else:
-            case_ir = build_circuit_ir(case.circuit, n_qubits=n_qubits)
-            supported, reason = aer.supports(case_ir)
-            if not supported:
-                abort_reason = f"aer unsupported: {reason}"
-            else:
-                try:
-                    prepared = aer.prepare(case_ir)
-                    wall_start = time.perf_counter()
-                    cpu_start = time.process_time()
-                    result = aer.run(prepared, SHOTS)
-                    wall_elapsed = time.perf_counter() - wall_start
-                    cpu_elapsed = time.process_time() - cpu_start
-                except Exception as error:
-                    abort_reason = str(error).strip()
+            result = resp["result"]
 
     if abort_reason is not None:
         correct = False
@@ -168,7 +330,6 @@ def run_case(case: BenchmarkCase, git_hash: str, *, backend: str, timeout: float
 
     return {
         "case": case.name,
-        "backend": backend,
         "git_hash": git_hash,
         "n_qubits": n_qubits,
         "workload": workload,
@@ -225,35 +386,11 @@ def print_results(results: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Quantum simulator benchmark")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("--cases", nargs="+", default=None)
-    parser.add_argument("--core", action="store_true")
-    parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument("--backend", choices=["native", "aer"], default="native")
-    parser.add_argument("--max-memory-gb", type=float, default=None,
-                        help="Max estimated GPU memory per case in GB (default: half of RAM).")
-    args = parser.parse_args()
-
-    if args.core and args.cases:
-        parser.error("Cannot use both --core and --cases.")
-
-    if args.core:
-        cases_to_run = CORE_CASES
-    elif args.cases is not None:
-        all_case_map = {case_fn().name: case_fn for case_fn in ALL_CASES}
-        unknown = [n for n in args.cases if n not in all_case_map]
-        if unknown:
-            parser.error(f"Unknown case(s): {', '.join(unknown)}")
-        cases_to_run = [all_case_map[n] for n in args.cases]
-    else:
-        cases_to_run = ALL_CASES
-
-    memory_limit_gb = args.max_memory_gb if args.max_memory_gb is not None else get_memory_limit_gb()
+    memory_limit_gb = get_memory_limit_gb()
     git_hash = get_git_hash()
-    print(f"Backend: {args.backend} | Git: {git_hash} | Shots: {SHOTS} | Memory limit: {memory_limit_gb:.0f} GB")
+    print(f"Git: {git_hash} | Shots: {SHOTS} | Memory limit: {memory_limit_gb:.0f} GB")
 
-    instantiated = [case_fn() for case_fn in cases_to_run]
+    instantiated = [case_fn() for case_fn in ALL_CASES]
     instantiated.sort(key=lambda c: c.n_qubits if c.n_qubits is not None else infer_resources(c.circuit)[0])
 
     results_dir = Path(__file__).parent / "results"
@@ -262,26 +399,29 @@ def main() -> None:
     output_path = results_dir / f"{timestamp}.jsonl"
 
     results: list[dict] = []
+    worker = _Worker()
 
-    with open(output_path, "w") as jsonl_f:
-        for case in instantiated:
-            try:
-                row = run_case(case, git_hash, backend=args.backend, timeout=args.timeout, memory_limit_gb=memory_limit_gb)
-            except Exception as e:
-                print(f"\nERROR in {case.name}: {e}")
-                row = {
-                    "case": case.name, "backend": args.backend, "git_hash": git_hash,
-                    "n_qubits": case.n_qubits or 0, "workload": "unknown",
-                    "ops": count_ops(case.circuit), "shots": SHOTS,
-                    "time_s": 0, "cpu_s": 0, "ops_per_sec": 0, "shots_per_sec": 0,
-                    "correct": False, "errors": [str(e)], "aborted": True,
-                }
-            results.append(row)
-            jsonl_f.write(json.dumps(row) + "\n")
-            jsonl_f.flush()
-            if args.verbose:
+    try:
+        with open(output_path, "w") as jsonl_f:
+            for case in instantiated:
+                try:
+                    row = run_case(case, git_hash, memory_limit_gb=memory_limit_gb, worker=worker)
+                except Exception as e:
+                    print(f"\nERROR in {case.name}: {e}")
+                    row = {
+                        "case": case.name, "git_hash": git_hash,
+                        "n_qubits": case.n_qubits or 0, "workload": "unknown",
+                        "ops": count_ops(case.circuit), "shots": SHOTS,
+                        "time_s": 0, "cpu_s": 0, "ops_per_sec": 0, "shots_per_sec": 0,
+                        "correct": False, "errors": [str(e)], "aborted": True,
+                    }
+                results.append(row)
+                jsonl_f.write(json.dumps(row) + "\n")
+                jsonl_f.flush()
                 status = "PASS" if row["correct"] else ("ABORT" if row["aborted"] else "FAIL")
                 print(f"  {row['case']}: {row['time_s']:.4f}s [{status}]")
+    finally:
+        worker.close()
 
     print(f"Wrote {output_path}")
     print_results(results)

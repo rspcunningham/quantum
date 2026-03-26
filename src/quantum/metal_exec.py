@@ -47,6 +47,7 @@ def execute_static_circuit(
     n_bits: int,
     num_shots: int,
     seed: int | None = None,
+    timeout: float = 0.0,
 ) -> dict[str, int]:
     """Compile + execute a static circuit via native Metal runtime."""
     if num_shots == 0:
@@ -63,5 +64,6 @@ def execute_static_circuit(
         int(n_bits),
         int(num_shots),
         None if seed is None else int(seed),
+        float(timeout),
     )
     return {str(bits): int(count) for bits, count in raw.items()}

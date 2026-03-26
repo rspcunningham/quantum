@@ -21,7 +21,7 @@ dependencies = [
 [project.scripts]
 bench = "benchmarks.run:main"
 bench-trace = "benchmarks.trace:main"
-bench-heatmap = "benchmarks.heatmap:main"
+bench-aer = "benchmarks.run_aer:main"
 
 [tool.scikit-build]
 minimum-version = "0.10"

@@ -1525,7 +1525,7 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
     m.def(
         "run_circuit",
         [](py::list flat_ops, int n_qubits, int n_bits,
-           std::int64_t num_shots, py::object seed_obj)
+           std::int64_t num_shots, py::object seed_obj, double timeout)
             -> std::unordered_map<std::string, std::int64_t>
         {
             std::optional<std::uint64_t> seed = std::nullopt;
@@ -1548,7 +1548,7 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
                     n_bits
                 );
                 try {
-                    auto counts = quantum_native::execute_static_program(handle, num_shots, seed);
+                    auto counts = quantum_native::execute_static_program(handle, num_shots, seed, timeout);
                     quantum_native::free_program(handle);
                     return counts;
                 } catch (...) {
@@ -1564,21 +1564,23 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
         py::arg("n_qubits"),
         py::arg("n_bits"),
         py::arg("num_shots"),
-        py::arg("seed") = py::none()
+        py::arg("seed") = py::none(),
+        py::arg("timeout") = 0.0
     );
 
     m.def(
         "execute_static_program",
-        [](std::int64_t handle, std::int64_t num_shots, py::object seed_obj) {
+        [](std::int64_t handle, std::int64_t num_shots, py::object seed_obj, double timeout) {
             std::optional<std::uint64_t> seed = std::nullopt;
             if (!seed_obj.is_none()) {
                 seed = seed_obj.cast<std::uint64_t>();
             }
-            return quantum_native::execute_static_program(handle, num_shots, seed);
+            return quantum_native::execute_static_program(handle, num_shots, seed, timeout);
         },
         py::arg("handle"),
         py::arg("num_shots"),
-        py::arg("seed") = py::none()
+        py::arg("seed") = py::none(),
+        py::arg("timeout") = 0.0
     );
 
     m.def(
