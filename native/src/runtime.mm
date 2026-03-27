@@ -1157,7 +1157,8 @@ StateBuffers execute_gates_only(
     float* state_im,
     float* scratch_re,
     float* scratch_im,
-    std::uint64_t dim
+    std::uint64_t dim,
+    double timeout_seconds
 ) {
     std::shared_ptr<Program> program = program_for_handle(handle);
     RuntimeState& s = state();
@@ -1217,8 +1218,23 @@ StateBuffers execute_gates_only(
         }
 
         [encoder endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+
+        if (timeout_seconds > 0.0) {
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            [cmd addCompletedHandler:^(id<MTLCommandBuffer> _) {
+                dispatch_semaphore_signal(sem);
+            }];
+            [cmd commit];
+            int64_t timeout_ns = static_cast<int64_t>(timeout_seconds * 1e9);
+            long wait_result = dispatch_semaphore_wait(
+                sem, dispatch_time(DISPATCH_TIME_NOW, timeout_ns));
+            if (wait_result != 0) {
+                throw std::runtime_error("timeout: GPU execution exceeded limit");
+            }
+        } else {
+            [cmd commit];
+            [cmd waitUntilCompleted];
+        }
 
         if (cmd.status != MTLCommandBufferStatusCompleted) {
             std::string err = "unknown";

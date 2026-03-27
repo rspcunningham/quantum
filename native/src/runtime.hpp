@@ -55,7 +55,8 @@ StateBuffers execute_gates_only(
     float* state_im,
     float* scratch_re,
     float* scratch_im,
-    std::uint64_t dim
+    std::uint64_t dim,
+    double timeout_seconds = 0.0
 );
 
 std::unordered_map<std::string, std::int64_t> get_program_stats(std::int64_t handle);

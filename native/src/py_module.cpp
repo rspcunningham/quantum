@@ -1132,7 +1132,8 @@ bool states_equal(const float* a_re, const float* a_im,
 std::unordered_map<std::string, std::int64_t> execute_dynamic_circuit(
     const DynamicCircuit& circuit,
     std::int64_t num_shots,
-    std::optional<std::uint64_t> seed
+    std::optional<std::uint64_t> seed,
+    double timeout_seconds = 0.0
 ) {
     const int n_qubits = circuit.n_qubits;
     const int n_bits = circuit.n_bits;
@@ -1148,16 +1149,31 @@ std::unordered_map<std::string, std::int64_t> execute_dynamic_circuit(
     float* scratch_re = static_cast<float*>(std::calloc(dim, sizeof(float)));
     float* scratch_im = static_cast<float*>(std::calloc(dim, sizeof(float)));
 
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = (timeout_seconds > 0.0)
+        ? Clock::now() + std::chrono::duration_cast<Clock::duration>(
+              std::chrono::duration<double>(timeout_seconds))
+        : Clock::time_point::max();
+
     auto run_segment = [&](std::size_t seg_idx, uint32_t classical_reg,
                            float* state_re, float* state_im) {
         std::vector<LocalOp> ops = resolve_segment(circuit.segments[seg_idx], classical_reg);
         if (ops.empty()) return;
+
+        double remaining = 0.0;
+        if (timeout_seconds > 0.0) {
+            remaining = std::chrono::duration<double>(deadline - Clock::now()).count();
+            if (remaining <= 0.0) {
+                throw std::runtime_error("timeout: GPU execution exceeded limit");
+            }
+        }
+
         const std::int64_t handle = compile_local_ops_to_program(
             std::move(ops), {}, n_qubits, 0
         );
         try {
             quantum_native::execute_gates_only(
-                handle, state_re, state_im, scratch_re, scratch_im, dim
+                handle, state_re, state_im, scratch_re, scratch_im, dim, remaining
             );
             quantum_native::free_program(handle);
         } catch (...) {
@@ -1558,7 +1574,7 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
             }
 
             // Dynamic path — branch tree execution
-            return execute_dynamic_circuit(circuit, num_shots, seed);
+            return execute_dynamic_circuit(circuit, num_shots, seed, timeout);
         },
         py::arg("flat_ops"),
         py::arg("n_qubits"),

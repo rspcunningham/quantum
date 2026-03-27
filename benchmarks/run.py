@@ -1,10 +1,10 @@
 """Benchmark runner for the quantum simulator."""
 
 import json
-import multiprocessing
 import os
 import pickle
 import resource
+import select
 import struct
 import subprocess
 import sys
@@ -132,7 +132,7 @@ def get_memory_limit_gb() -> float:
 # ---------------------------------------------------------------------------
 
 _WORKER_SCRIPT = """\
-import pickle, struct, sys, time, os
+import pickle, struct, sys, time
 
 # Import only the simulator — not benchmarks.
 from quantum import run_simulation
@@ -189,7 +189,6 @@ def _send(pipe, obj):
 
 def _recv(pipe, deadline):
     """Read a length-prefixed pickle from a raw fd, respecting deadline."""
-    import select
 
     def _read_exact(n):
         buf = bytearray()
@@ -381,8 +380,8 @@ def print_results(results: list[dict]) -> None:
 
     complete = [r for r in results if not r["aborted"]]
     passed = [r for r in complete if r["correct"]]
+    total = sum(r["time_s"] for r in complete)
     if complete:
-        total = sum(r["time_s"] for r in complete)
         print(f"\nTotal: {len(complete)}/{len(results)} cases in {total:.3f}s | Peak RSS: {get_peak_rss_mb():.0f} MB")
 
     fail_count = len(complete) - len(passed)
