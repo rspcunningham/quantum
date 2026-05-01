@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -7,7 +8,7 @@ def plot_results(results: dict[str, int], title: str = "Quantum Measurement Resu
     """Plot simulation results as a bar chart.
 
     Args:
-        results: Dictionary mapping bit strings to their counts (from run_simulation)
+        results: Dictionary mapping bit strings to their counts.
         title: Title for the plot
         show: Whether to display the plot immediately (default: True)
 

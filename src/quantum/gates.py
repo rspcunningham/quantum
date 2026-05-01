@@ -267,16 +267,24 @@ class Circuit:
         return out
 
     def flatten_native(self) -> list[native.NativeGate | native.NativeMeasurement]:
-        """Flatten to a list of native objects for the C++ runtime."""
+        """Flatten a static circuit to native objects for the C++ runtime."""
         flat = self._flatten_operations()
         out: list[native.NativeGate | native.NativeMeasurement] = []
+        seen_measurement = False
         for op in flat:
             if isinstance(op, Gate):
+                if seen_measurement:
+                    raise ValueError(
+                        "Static circuits require all measurements to be terminal."
+                    )
                 out.append(op._native)
             elif isinstance(op, Measurement):
+                seen_measurement = True
                 out.append(native.NativeMeasurement(op.qubit, op.bit))
             elif isinstance(op, ConditionalGate):
-                out.append(native.make_conditional(op.gate._native, op.condition))
+                raise ValueError(
+                    "Conditional gates are dynamic and are not supported by quantum.compile()."
+                )
             else:
                 raise RuntimeError(f"Unknown operation type: {type(op)}")
         return out

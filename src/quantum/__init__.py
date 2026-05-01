@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from quantum.gates import (
     Gate,
     GateType,
@@ -12,13 +14,28 @@ from quantum.gates import (
     CX, CZ, CCX, SWAP,
     RX, RY, RZ, CP,
 )
-from quantum.system import run_simulation, measure_all, infer_resources
-from quantum.qasm import parse_qasm, ParsedCircuit
-from quantum.visualization import plot_results
+from quantum.metal_exec import CompiledCircuit, compile
+from quantum.system import measure_all, infer_resources
+
+if TYPE_CHECKING:
+    from quantum.qasm import ParsedCircuit, parse_qasm
+
+
+def __getattr__(name: str):
+    if name == "parse_qasm":
+        from quantum.qasm import parse_qasm
+
+        return parse_qasm
+    if name == "ParsedCircuit":
+        from quantum.qasm import ParsedCircuit
+
+        return ParsedCircuit
+    raise AttributeError(f"module 'quantum' has no attribute {name!r}")
+
 
 __all__ = [
     # Core
-    "Circuit", "run_simulation", "measure_all", "infer_resources",
+    "Circuit", "CompiledCircuit", "compile", "measure_all", "infer_resources",
     # Registers
     "QuantumRegister", "registers",
     # Gates
@@ -26,9 +43,7 @@ __all__ = [
     "CX", "CZ", "CCX", "SWAP",
     "RX", "RY", "RZ", "CP",
     # Gate types
-    "Gate", "GateType", "ParametricGateType", "ConditionalGate", "Measurement",
+    "Gate", "GateType", "ParametricGateType", "CustomGateType", "ConditionalGate", "Measurement",
     # QASM
     "parse_qasm", "ParsedCircuit",
-    # Visualization
-    "plot_results",
 ]

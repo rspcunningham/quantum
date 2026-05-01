@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from benchmarks.cases import BenchmarkCase, ALL_CASES
-from quantum import run_simulation, infer_resources
+from quantum import compile as compile_circuit, infer_resources
 from quantum.gates import Gate, Measurement, ConditionalGate, Circuit
 
 SHOTS = 10_000
@@ -126,7 +126,7 @@ def get_memory_limit_gb() -> float:
 # Long-lived worker subprocess
 #
 # Spawned once. Receives (circuit, n_qubits, shots, timeout) over stdin,
-# calls run_simulation with the native C++ timeout, sends back the result.
+# compiles and runs with the native C++ timeout, sends back the result.
 # On timeout the C++ layer throws immediately; the worker exits so the
 # parent can spawn a fresh one with a clean Metal context.
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ _WORKER_SCRIPT = """\
 import pickle, struct, sys, time
 
 # Import only the simulator — not benchmarks.
-from quantum import run_simulation
+from quantum import compile as compile_circuit
 
 stdin = sys.stdin.buffer
 stdout = sys.stdout.buffer
@@ -161,7 +161,8 @@ while True:
     try:
         t0 = time.perf_counter()
         c0 = time.process_time()
-        result = run_simulation(circuit, shots, n_qubits=n_qubits, timeout=timeout)
+        with compile_circuit(circuit, n_qubits=n_qubits) as compiled:
+            result = compiled.run(shots, timeout=timeout)
         wall = time.perf_counter() - t0
         cpu = time.process_time() - c0
     except Exception as e:
@@ -304,7 +305,9 @@ def run_case(case: BenchmarkCase, git_hash: str, *, memory_limit_gb: float, work
     cpu_elapsed = 0.0
 
     estimated_gb = estimate_memory_gb(n_qubits)
-    if estimated_gb > memory_limit_gb:
+    if workload == "dynamic":
+        abort_reason = "unsupported: dynamic circuits are not supported by the static compiled runtime"
+    elif estimated_gb > memory_limit_gb:
         abort_reason = f"skipped: {estimated_gb:.1f} GB estimated > {memory_limit_gb:.1f} GB limit ({n_qubits} qubits)"
     else:
         resp = worker.run(case.circuit, n_qubits, SHOTS, TIMEOUT)

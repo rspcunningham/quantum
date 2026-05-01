@@ -9,11 +9,9 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <optional>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -144,11 +142,6 @@ struct NativeGate {
 struct NativeMeasurement {
     int32_t qubit;
     int32_t bit;
-};
-
-struct NativeConditionalGate {
-    NativeGate gate;
-    int32_t condition;
 };
 
 // ---------------------------------------------------------------------------
@@ -1009,75 +1002,39 @@ std::int64_t compile_local_ops_to_program(
 // Circuit extraction — walk a flat Python list of NativeGate/NativeMeasurement
 // ---------------------------------------------------------------------------
 
-struct SegmentEntry {
-    LocalOp op;
-    int32_t condition;  // -1 = unconditional
-};
-
-struct DynamicSegment {
-    std::vector<SegmentEntry> entries;
-};
-
-struct MidMeasurement {
-    int32_t qubit;
-    int32_t bit;
-};
-
-struct DynamicCircuit {
-    int n_qubits;
-    int n_bits;
-    bool is_static;
-    std::vector<DynamicSegment> segments;
-    std::vector<MidMeasurement> measurements;  // measurements[i] is between segment[i] and segment[i+1]
+struct StaticCircuit {
+    std::vector<LocalOp> ops;
     std::vector<int32_t> terminal_measurements;
 };
 
-DynamicCircuit extract_dynamic_circuit(py::list flat_ops, int n_qubits, int n_bits) {
+StaticCircuit extract_static_circuit(py::list flat_ops) {
     const std::size_t n = flat_ops.size();
 
-    // Find terminal measurement boundary
     std::size_t terminal_start = n;
     while (terminal_start > 0
            && py::isinstance<NativeMeasurement>(flat_ops[terminal_start - 1])) {
         terminal_start--;
     }
 
-    DynamicCircuit result;
-    result.n_qubits = n_qubits;
-    result.n_bits = n_bits;
-    result.is_static = true;
-
-    DynamicSegment current_segment;
+    StaticCircuit result;
+    result.ops.reserve(terminal_start);
 
     for (std::size_t i = 0; i < terminal_start; ++i) {
         py::handle op = flat_ops[i];
 
         if (py::isinstance<NativeGate>(op)) {
-            current_segment.entries.push_back(
-                SegmentEntry{op.cast<NativeGate&>().op, -1}
-            );
+            result.ops.push_back(op.cast<NativeGate&>().op);
         } else if (py::isinstance<NativeMeasurement>(op)) {
-            // Mid-circuit measurement: close current segment, record measurement
-            result.is_static = false;
-            result.segments.push_back(std::move(current_segment));
-            current_segment = DynamicSegment{};
-            auto m = op.cast<NativeMeasurement&>();
-            result.measurements.push_back(MidMeasurement{m.qubit, m.bit});
-        } else if (py::isinstance<NativeConditionalGate>(op)) {
-            result.is_static = false;
-            auto cond = op.cast<NativeConditionalGate&>();
-            current_segment.entries.push_back(
-                SegmentEntry{cond.gate.op, cond.condition}
+            throw std::runtime_error(
+                "Static circuits only support terminal measurements"
             );
         } else {
-            throw std::runtime_error("Unknown operation type in circuit");
+            throw std::runtime_error(
+                "Static circuits only support gates followed by terminal measurements"
+            );
         }
     }
 
-    // Last segment (gates after the last mid-circuit measurement)
-    result.segments.push_back(std::move(current_segment));
-
-    // Terminal measurements
     result.terminal_measurements.reserve((n - terminal_start) * 2);
     for (std::size_t i = terminal_start; i < n; ++i) {
         if (!py::isinstance<NativeMeasurement>(flat_ops[i])) {
@@ -1091,318 +1048,6 @@ DynamicCircuit extract_dynamic_circuit(py::list flat_ops, int n_qubits, int n_bi
     }
 
     return result;
-}
-
-// Resolve conditional gates for a known classical register state.
-// Unconditional gates are always included; conditional gates are included
-// only if the full classical register integer matches the condition.
-std::vector<LocalOp> resolve_segment(
-    const DynamicSegment& segment,
-    uint32_t classical_reg
-) {
-    std::vector<LocalOp> ops;
-    ops.reserve(segment.entries.size());
-    for (const auto& entry : segment.entries) {
-        if (entry.condition < 0) {
-            ops.push_back(entry.op);
-        } else if (static_cast<uint32_t>(entry.condition) == classical_reg) {
-            ops.push_back(entry.op);
-        }
-        // else: skip (condition not met)
-    }
-    return ops;
-}
-
-// Check if two state vectors are equal within tolerance.
-bool states_equal(const float* a_re, const float* a_im,
-                  const float* b_re, const float* b_im,
-                  uint64_t dim) {
-    constexpr float tol = 1e-5f;
-    for (uint64_t i = 0; i < dim; ++i) {
-        float dr = a_re[i] - b_re[i];
-        float di = a_im[i] - b_im[i];
-        if (dr * dr + di * di > tol * tol) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Execute dynamic circuit via iterative branch processing with pruning.
-std::unordered_map<std::string, std::int64_t> execute_dynamic_circuit(
-    const DynamicCircuit& circuit,
-    std::int64_t num_shots,
-    std::optional<std::uint64_t> seed,
-    double timeout_seconds = 0.0
-) {
-    const int n_qubits = circuit.n_qubits;
-    const int n_bits = circuit.n_bits;
-    const uint64_t dim = 1ULL << n_qubits;
-    const std::size_t bytes = static_cast<std::size_t>(dim) * sizeof(float);
-
-    const std::size_t prob_size = std::max<std::size_t>(
-        static_cast<std::size_t>(dim),
-        n_bits > 0 ? (1ULL << n_bits) : 1
-    );
-    std::vector<double> combined_probs(prob_size, 0.0);
-
-    float* scratch_re = static_cast<float*>(std::calloc(dim, sizeof(float)));
-    float* scratch_im = static_cast<float*>(std::calloc(dim, sizeof(float)));
-
-    using Clock = std::chrono::steady_clock;
-    const auto deadline = (timeout_seconds > 0.0)
-        ? Clock::now() + std::chrono::duration_cast<Clock::duration>(
-              std::chrono::duration<double>(timeout_seconds))
-        : Clock::time_point::max();
-
-    auto run_segment = [&](std::size_t seg_idx, uint32_t classical_reg,
-                           float* state_re, float* state_im) {
-        std::vector<LocalOp> ops = resolve_segment(circuit.segments[seg_idx], classical_reg);
-        if (ops.empty()) return;
-
-        double remaining = 0.0;
-        if (timeout_seconds > 0.0) {
-            remaining = std::chrono::duration<double>(deadline - Clock::now()).count();
-            if (remaining <= 0.0) {
-                throw std::runtime_error("timeout: GPU execution exceeded limit");
-            }
-        }
-
-        const std::int64_t handle = compile_local_ops_to_program(
-            std::move(ops), {}, n_qubits, 0
-        );
-        try {
-            quantum_native::execute_gates_only(
-                handle, state_re, state_im, scratch_re, scratch_im, dim, remaining
-            );
-            quantum_native::free_program(handle);
-        } catch (...) {
-            try { quantum_native::free_program(handle); } catch (...) {}
-            throw;
-        }
-    };
-
-    auto collapse = [&](float* re, float* im, int qubit, int outcome) {
-        const uint64_t bit_pos = static_cast<uint64_t>(n_qubits - 1 - qubit);
-        const uint64_t mask = 1ULL << bit_pos;
-        const uint64_t target = (outcome == 1) ? mask : 0ULL;
-        double norm_sq = 0.0;
-        for (uint64_t i = 0; i < dim; ++i) {
-            if ((i & mask) != target) {
-                re[i] = 0.0f; im[i] = 0.0f;
-            } else {
-                norm_sq += static_cast<double>(re[i]) * re[i]
-                         + static_cast<double>(im[i]) * im[i];
-            }
-        }
-        float scale = 1.0f / std::sqrt(static_cast<float>(norm_sq));
-        for (uint64_t i = 0; i < dim; ++i) {
-            re[i] *= scale; im[i] *= scale;
-        }
-    };
-
-    auto accumulate_leaf = [&](const float* state_re, const float* state_im,
-                               uint32_t classical_reg, double branch_prob) {
-        const std::size_t terminal_count = circuit.terminal_measurements.size() / 2;
-        if (terminal_count == 0) {
-            for (uint64_t i = 0; i < dim; ++i) {
-                double re = state_re[i], im = state_im[i];
-                combined_probs[i] += branch_prob * (re * re + im * im);
-            }
-        } else {
-            for (uint64_t basis = 0; basis < dim; ++basis) {
-                double re = state_re[basis], im = state_im[basis];
-                double prob = re * re + im * im;
-                if (prob < 1e-15) continue;
-                uint32_t code = classical_reg;
-                for (std::size_t t = 0; t < terminal_count; ++t) {
-                    int q = circuit.terminal_measurements[t * 2 + 0];
-                    int b = circuit.terminal_measurements[t * 2 + 1];
-                    uint32_t qubit_shift = static_cast<uint32_t>(n_qubits - 1 - q);
-                    uint32_t bit_shift = static_cast<uint32_t>(n_bits - 1 - b);
-                    uint32_t measured = (static_cast<uint32_t>(basis) >> qubit_shift) & 1u;
-                    code = (code & ~(1u << bit_shift)) | (measured << bit_shift);
-                }
-                combined_probs[code] += branch_prob * prob;
-            }
-        }
-    };
-
-    // Iterative: maintain a list of active branches.
-    // Process one segment+measurement at a time across all branches.
-    struct Branch {
-        uint32_t classical_reg;
-        double prob;
-        std::vector<float> state_re;
-        std::vector<float> state_im;
-    };
-
-    // Initialize with single branch: |0...0⟩
-    std::vector<Branch> branches;
-    branches.push_back(Branch{0, 1.0, std::vector<float>(dim, 0.0f), std::vector<float>(dim, 0.0f)});
-    branches[0].state_re[0] = 1.0f;
-
-    // Process each segment + measurement.
-    // seg_already_run tracks whether we pre-executed the current segment
-    // during the previous iteration's pruning step.
-    bool seg_already_run = false;
-
-    for (std::size_t seg = 0; seg < circuit.segments.size(); ++seg) {
-        // Execute this segment for all branches (unless pre-executed by pruning)
-        if (!seg_already_run) {
-            for (auto& branch : branches) {
-                run_segment(seg, branch.classical_reg,
-                           branch.state_re.data(), branch.state_im.data());
-            }
-        }
-        seg_already_run = false;
-
-        // If there's a measurement after this segment, fork branches
-        if (seg < circuit.measurements.size()) {
-            const MidMeasurement& meas = circuit.measurements[seg];
-            const uint64_t bit_pos = static_cast<uint64_t>(n_qubits - 1 - meas.qubit);
-            const uint64_t mask = 1ULL << bit_pos;
-            const uint32_t reg_bit_shift = static_cast<uint32_t>(n_bits - 1 - meas.bit);
-
-            std::vector<Branch> next_branches;
-            next_branches.reserve(branches.size() * 2);
-
-            for (auto& branch : branches) {
-                // Compute p(outcome=0)
-                double prob_0 = 0.0;
-                for (uint64_t i = 0; i < dim; ++i) {
-                    if ((i & mask) == 0) {
-                        double re = branch.state_re[i], im = branch.state_im[i];
-                        prob_0 += re * re + im * im;
-                    }
-                }
-                double prob_1 = 1.0 - prob_0;
-
-                if (prob_0 > 1e-12) {
-                    Branch b0;
-                    b0.classical_reg = branch.classical_reg & ~(1u << reg_bit_shift);
-                    b0.prob = branch.prob * prob_0;
-                    b0.state_re = branch.state_re;  // copy
-                    b0.state_im = branch.state_im;
-                    collapse(b0.state_re.data(), b0.state_im.data(), meas.qubit, 0);
-                    next_branches.push_back(std::move(b0));
-                }
-                if (prob_1 > 1e-12) {
-                    Branch b1;
-                    b1.classical_reg = branch.classical_reg | (1u << reg_bit_shift);
-                    b1.prob = branch.prob * prob_1;
-                    b1.state_re = std::move(branch.state_re);  // move (last use)
-                    b1.state_im = std::move(branch.state_im);
-                    collapse(b1.state_re.data(), b1.state_im.data(), meas.qubit, 1);
-                    next_branches.push_back(std::move(b1));
-                }
-            }
-
-            // Pruning: merge branches with identical quantum states.
-            // Execute next segment first so conditionals are resolved before comparison.
-            if (seg + 1 < circuit.segments.size()) {
-                for (auto& branch : next_branches) {
-                    run_segment(seg + 1, branch.classical_reg,
-                               branch.state_re.data(), branch.state_im.data());
-                }
-
-                // Compare all pairs and merge branches with identical
-                // classical register AND quantum state.
-                std::vector<bool> merged(next_branches.size(), false);
-                for (std::size_t i = 0; i < next_branches.size(); ++i) {
-                    if (merged[i]) continue;
-                    for (std::size_t j = i + 1; j < next_branches.size(); ++j) {
-                        if (merged[j]) continue;
-                        if (next_branches[i].classical_reg == next_branches[j].classical_reg
-                            && states_equal(next_branches[i].state_re.data(),
-                                           next_branches[i].state_im.data(),
-                                           next_branches[j].state_re.data(),
-                                           next_branches[j].state_im.data(), dim)) {
-                            next_branches[i].prob += next_branches[j].prob;
-                            merged[j] = true;
-                        }
-                    }
-                }
-
-                // Remove merged branches
-                std::vector<Branch> pruned;
-                pruned.reserve(next_branches.size());
-                for (std::size_t i = 0; i < next_branches.size(); ++i) {
-                    if (!merged[i]) {
-                        pruned.push_back(std::move(next_branches[i]));
-                    }
-                }
-
-                // Mark next segment as already executed (don't skip it —
-                // we still need to process its measurement)
-                seg_already_run = true;
-                branches = std::move(pruned);
-            } else {
-                branches = std::move(next_branches);
-            }
-        }
-        // else: no measurement, just continue to next segment (or leaf)
-    }
-
-    // All segments processed — accumulate leaf distributions
-    for (const auto& branch : branches) {
-        accumulate_leaf(branch.state_re.data(), branch.state_im.data(),
-                       branch.classical_reg, branch.prob);
-    }
-
-    std::free(scratch_re);
-    std::free(scratch_im);
-
-    // Sample num_shots from the combined probability distribution
-    const uint64_t resolved_seed = seed.value_or(static_cast<uint64_t>(std::random_device{}()));
-    std::mt19937_64 rng(resolved_seed);
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-
-    // Build CDF
-    std::vector<double> cdf(combined_probs.size());
-    double total = 0.0;
-    for (std::size_t i = 0; i < combined_probs.size(); ++i) {
-        total += combined_probs[i];
-        cdf[i] = total;
-    }
-    // Normalize
-    if (total > 0.0) {
-        for (auto& v : cdf) v /= total;
-    }
-    cdf.back() = 1.0;  // ensure last entry is exactly 1
-
-    // Sample
-    std::unordered_map<uint32_t, std::int64_t> code_counts;
-    for (std::int64_t s = 0; s < num_shots; ++s) {
-        double u = dist(rng);
-        auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
-        uint32_t code = static_cast<uint32_t>(std::distance(cdf.begin(), it));
-        if (code >= static_cast<uint32_t>(cdf.size())) {
-            code = static_cast<uint32_t>(cdf.size() - 1);
-        }
-        code_counts[code]++;
-    }
-
-    // Convert to bitstring output
-    // Determine the number of output bits
-    int output_bits = n_bits;
-    if (output_bits == 0 && circuit.terminal_measurements.empty()) {
-        output_bits = n_qubits;
-    }
-
-    std::unordered_map<std::string, std::int64_t> output;
-    output.reserve(code_counts.size());
-    for (const auto& entry : code_counts) {
-        std::string bits(output_bits, '0');
-        for (int b = 0; b < output_bits; ++b) {
-            if ((entry.first >> (output_bits - 1 - b)) & 1u) {
-                bits[b] = '1';
-            }
-        }
-        output[bits] = entry.second;
-    }
-
-    return output;
 }
 
 }  // namespace
@@ -1445,10 +1090,6 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
         .def(py::init<int32_t, int32_t>(), py::arg("qubit"), py::arg("bit"))
         .def_readonly("qubit", &NativeMeasurement::qubit)
         .def_readonly("bit", &NativeMeasurement::bit);
-
-    py::class_<NativeConditionalGate>(m, "NativeConditionalGate")
-        .def_readonly("gate", &NativeConditionalGate::gate)
-        .def_readonly("condition", &NativeConditionalGate::condition);
 
     // -- Gate factory --
 
@@ -1501,33 +1142,14 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
         py::arg("targets")
     );
 
-    m.def(
-        "make_conditional",
-        [](NativeGate gate, int32_t condition) -> NativeConditionalGate {
-            return NativeConditionalGate{std::move(gate), condition};
-        },
-        py::arg("gate"),
-        py::arg("condition")
-    );
-
     // -- Compile and execute --
 
     m.def(
         "compile_circuit",
         [](py::list flat_ops, int n_qubits, int n_bits) -> std::int64_t {
-            auto circuit = extract_dynamic_circuit(flat_ops, n_qubits, n_bits);
-            if (!circuit.is_static) {
-                throw std::runtime_error(
-                    "compile_circuit does not support dynamic circuits. Use run_circuit instead."
-                );
-            }
-            // Extract ops from the single segment
-            std::vector<LocalOp> ops;
-            for (auto& entry : circuit.segments[0].entries) {
-                ops.push_back(std::move(entry.op));
-            }
+            auto circuit = extract_static_circuit(flat_ops);
             return compile_local_ops_to_program(
-                std::move(ops),
+                std::move(circuit.ops),
                 std::move(circuit.terminal_measurements),
                 n_qubits,
                 n_bits
@@ -1536,52 +1158,6 @@ PYBIND11_MODULE(quantum_native_runtime, m) {
         py::arg("flat_ops"),
         py::arg("n_qubits"),
         py::arg("n_bits")
-    );
-
-    m.def(
-        "run_circuit",
-        [](py::list flat_ops, int n_qubits, int n_bits,
-           std::int64_t num_shots, py::object seed_obj, double timeout)
-            -> std::unordered_map<std::string, std::int64_t>
-        {
-            std::optional<std::uint64_t> seed = std::nullopt;
-            if (!seed_obj.is_none()) {
-                seed = seed_obj.cast<std::uint64_t>();
-            }
-
-            auto circuit = extract_dynamic_circuit(flat_ops, n_qubits, n_bits);
-
-            if (circuit.is_static) {
-                // Static fast path — same as before
-                std::vector<LocalOp> ops;
-                for (auto& entry : circuit.segments[0].entries) {
-                    ops.push_back(std::move(entry.op));
-                }
-                const std::int64_t handle = compile_local_ops_to_program(
-                    std::move(ops),
-                    std::move(circuit.terminal_measurements),
-                    n_qubits,
-                    n_bits
-                );
-                try {
-                    auto counts = quantum_native::execute_static_program(handle, num_shots, seed, timeout);
-                    quantum_native::free_program(handle);
-                    return counts;
-                } catch (...) {
-                    try { quantum_native::free_program(handle); } catch (...) {}
-                    throw;
-                }
-            }
-
-            // Dynamic path — branch tree execution
-            return execute_dynamic_circuit(circuit, num_shots, seed, timeout);
-        },
-        py::arg("flat_ops"),
-        py::arg("n_qubits"),
-        py::arg("n_bits"),
-        py::arg("num_shots"),
-        py::arg("seed") = py::none(),
-        py::arg("timeout") = 0.0
     );
 
     m.def(

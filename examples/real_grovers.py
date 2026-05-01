@@ -3,7 +3,12 @@ import time
 
 import numpy as np
 
-from quantum import Circuit, QuantumRegister, run_simulation, registers, H, X, I, CX, CustomGateType, measure_all, plot_results
+from quantum import Circuit, QuantumRegister, registers, H, X, I, CX, CustomGateType, compile, measure_all
+
+try:
+    from quantum.visualization import plot_results
+except ImportError:
+    plot_results = None
 
 
 def _mcx(n_controls: int) -> CustomGateType:
@@ -95,7 +100,8 @@ circuit = init + (oracle + diffuser) * iterations + measure_all(input_reg)
 print(f"Applying {iterations} iterations")
 
 start_time = time.time()
-result = run_simulation(circuit, 100, n_qubits=total_qubits)
+with compile(circuit, n_qubits=total_qubits) as compiled:
+    result = compiled.run(100)
 end_time = time.time()
 
 print(f"time: {end_time - start_time}")
@@ -106,4 +112,5 @@ print(f"Most likely solution: {most_likely}")
 hashed_most_likely = classical_hash(most_likely)
 print(f"Hashed most likely solution: {hashed_most_likely}")
 print(f"Target hash: {target_hash} | Solution hash: {hashed_most_likely} | Match: {hashed_most_likely == target_hash}")
-_ = plot_results(result)
+if plot_results is not None:
+    _ = plot_results(result)

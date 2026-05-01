@@ -1,6 +1,11 @@
 import numpy as np
 
-from quantum import run_simulation, registers, H, X, CustomGateType, measure_all, plot_results
+from quantum import CustomGateType, H, X, compile, measure_all, registers
+
+try:
+    from quantum.visualization import plot_results
+except ImportError:
+    plot_results = None
 
 
 def _mcx(n_controls: int) -> CustomGateType:
@@ -24,5 +29,8 @@ oracle = C4X(*search, anc)
 diffuser = H.on(search) + X.on(search) + C4X(*search, anc) + X.on(search) + H.on(search)
 
 circuit = init + (oracle + diffuser) * 3 + measure_all(search)
-result = run_simulation(circuit, 100)
-_ = plot_results(result)
+with compile(circuit) as compiled:
+    result = compiled.run(100)
+print(result)
+if plot_results is not None:
+    _ = plot_results(result)

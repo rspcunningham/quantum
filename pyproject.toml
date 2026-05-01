@@ -12,6 +12,10 @@ description = "Quantum circuit simulator with native Metal runtime for Apple Sil
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.3.4",
+]
+
+[project.optional-dependencies]
+viz = [
     "matplotlib>=3.9.2",
     "seaborn>=0.13.2",
 ]

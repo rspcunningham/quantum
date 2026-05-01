@@ -6,15 +6,13 @@ from dataclasses import dataclass
 
 from benchmarks.backends.base import BackendAdapter, BackendAvailability
 from benchmarks.ir import CircuitIR
-from quantum import run_simulation
+from quantum import CompiledCircuit, compile as compile_circuit
 from quantum.gates import Circuit
 
 
 @dataclass(frozen=True)
 class NativePreparedCase:
-    circuit: Circuit
-    n_qubits: int
-    n_bits: int
+    compiled: CompiledCircuit
 
 
 class NativeAdapter(BackendAdapter):
@@ -30,14 +28,17 @@ class NativeAdapter(BackendAdapter):
         return {"backend": "metal"}
 
     def supports(self, case_ir: CircuitIR) -> tuple[bool, str | None]:
+        if case_ir.is_dynamic:
+            return False, "dynamic circuits are not supported by the static compiled native backend"
         return True, None
 
     def prepare(self, case_ir: CircuitIR) -> NativePreparedCase:
         circuit = case_ir.source_circuit
         if not isinstance(circuit, Circuit):
             raise RuntimeError("Invalid native circuit payload.")
-        return NativePreparedCase(circuit=circuit, n_qubits=case_ir.n_qubits, n_bits=case_ir.n_bits)
+        compiled = compile_circuit(circuit, n_qubits=case_ir.n_qubits, n_bits=case_ir.n_bits)
+        return NativePreparedCase(compiled=compiled)
 
     def run(self, prepared_case: NativePreparedCase, shots: int, *, warmup: bool = False) -> dict[str, int]:
         _ = warmup
-        return run_simulation(prepared_case.circuit, shots, n_qubits=prepared_case.n_qubits, n_bits=prepared_case.n_bits)
+        return prepared_case.compiled.run(shots)

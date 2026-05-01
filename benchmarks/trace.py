@@ -8,8 +8,7 @@ import sys
 from pathlib import Path
 
 from benchmarks.cases import ALL_CASES
-from quantum import run_simulation, infer_resources
-import quantum.system as quantum_system_module
+from quantum import compile as compile_circuit, infer_resources
 
 
 CASE_MAP = {case_fn().name: case_fn for case_fn in ALL_CASES}
@@ -17,9 +16,6 @@ CASE_MAP = {case_fn().name: case_fn for case_fn in ALL_CASES}
 
 def clear_runtime_caches() -> None:
     """Clear simulator caches before a cold profile."""
-    circuit_cache = getattr(quantum_system_module, "_circuit_compilation_cache", None)
-    if isinstance(circuit_cache, dict):
-        circuit_cache.clear()
     gc.collect()
 
 
@@ -57,14 +53,18 @@ def main() -> None:
 
     if args.cold:
         clear_runtime_caches()
+        profiler = cProfile.Profile()
+        profiler.enable()
+        with compile_circuit(case.circuit, n_qubits=n_qubits) as compiled:
+            compiled.run(args.shots)
+        profiler.disable()
     else:
-        # Warmup to focus on steady-state costs.
-        run_simulation(case.circuit, 1, n_qubits=n_qubits)
-
-    profiler = cProfile.Profile()
-    profiler.enable()
-    run_simulation(case.circuit, args.shots, n_qubits=n_qubits)
-    profiler.disable()
+        with compile_circuit(case.circuit, n_qubits=n_qubits) as compiled:
+            compiled.run(1)
+            profiler = cProfile.Profile()
+            profiler.enable()
+            compiled.run(args.shots)
+            profiler.disable()
 
     profiler.dump_stats(str(prof_path))
     print(f"\nProfile: {prof_path} ({prof_path.stat().st_size / 1024:.1f} KB)")

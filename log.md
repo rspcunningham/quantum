@@ -110,10 +110,20 @@ Goal: assess the repository for performance, modern best practices, low overhead
 ## Priority Recommendations
 
 1. Split runtime from optional features: make `import quantum` avoid visualization, Qiskit, Rich, and benchmark imports. Move plotting and Aer into extras. This is the clearest lightweight win.
-2. Add a Python `CompiledCircuit` API backed by native `compile_circuit`, `execute_static_program`, and `free_program`; keep `run_simulation()` as convenience. This lets state buffers and native program lowering amortize across repeated runs.
+2. Add a Python `CompiledCircuit` API backed by native `compile_circuit`, `execute_static_program`, and `free_program`; remove the one-shot execution API so all runtime calls use compiled handles. This lets state buffers and native program lowering amortize across repeated runs.
 3. Replace static sampling scan with a work-efficient hierarchical GPU prefix sum, or add specialized samplers for common sparse/structured cases. Current full CDF scan is an obvious high-qubit bottleneck.
 4. Fix `Circuit.inverse()` or remove/rename it until correct. Incorrect inverse semantics are dangerous because benchmarks/examples use the name heavily.
 5. Add input validation across Python and native boundaries: qubit/bit bounds, duplicate targets, dense matrix shape, negative shots, large `n_bits`, malformed QASM, measurement bit bounds, and condition width.
 6. Rework Metal buffer storage modes and allocation reuse based on measured Apple Silicon behavior. At minimum, separate GPU-only state/scratch buffers from CPU-read histogram/output buffers.
 7. Stabilize dynamic circuits by caching compiled segments within a run, using RAII vectors/buffers, bounding branch growth, and deciding whether dynamic support is a first-class performance target or a correctness-only fallback.
 8. Tighten tests: add deterministic seeded tests, inverse tests, QASM parser tests, dynamic tests, and small native unit tests around edge cases. Add a benchmark smoke suite that runs in seconds.
+
+## Static Compiled API Migration Notes
+
+- Implemented the public path as `quantum.compile(circuit, n_qubits=None, n_bits=None) -> CompiledCircuit`, with `CompiledCircuit.run(shots, seed=None, timeout=0.0)`.
+- Removed `run_simulation` from the public API surface and moved examples, tests, and benchmark callers to the compiled handle.
+- Made Python circuit flattening static-only: gates are allowed before terminal measurements; gates after measurement and `ConditionalGate` instances fail before native conversion.
+- Removed native dynamic execution source symbols: `run_circuit`, `NativeConditionalGate`, `make_conditional`, `execute_dynamic_circuit`, and `execute_gates_only`.
+- Kept `Measurement` as terminal output mapping for static circuits.
+- Moved plotting dependencies to the `viz` optional extra and made QASM exports lazy so `import quantum` stays lightweight.
+- Deferred sampler/CDF rewrite per plan; this pass is API and dynamic clearout only.

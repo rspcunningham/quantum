@@ -42,23 +42,6 @@ std::unordered_map<std::string, std::int64_t> execute_static_program(
     double timeout_seconds = 0.0
 );
 
-/// Execute only the gate dispatch portion of a compiled program.
-/// Operates on externally-provided state buffers (no sampling).
-/// Returns the state buffers that contain the final state (after ping-pong swaps).
-struct StateBuffers {
-    void* re;
-    void* im;
-};
-StateBuffers execute_gates_only(
-    std::int64_t handle,
-    float* state_re,
-    float* state_im,
-    float* scratch_re,
-    float* scratch_im,
-    std::uint64_t dim,
-    double timeout_seconds = 0.0
-);
-
 std::unordered_map<std::string, std::int64_t> get_program_stats(std::int64_t handle);
 void free_program(std::int64_t handle);
 
