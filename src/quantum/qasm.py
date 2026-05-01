@@ -30,6 +30,8 @@ def _eval_param(expr: str) -> float:
 
 def _safe_eval(node: ast.expr) -> float:
     if isinstance(node, ast.Constant):
+        if not isinstance(node.value, int | float):
+            raise ValueError(f"Unsupported constant: {node.value!r}")
         return float(node.value)
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.USub):

@@ -4,8 +4,8 @@ Focus: complex circuits that produce broad, non-trivial measurement distribution
 and stress-test simulators with deep entanglement, non-Clifford gates, and high
 qubit counts (up to 30).
 
-Run: uv run python benchmarks/generate_advanced_circuits.py
-Then: uv run python benchmarks/generate_expected.py  (to get Aer reference distributions)
+Run: uv run --group bench python -m benchmarks.generate_advanced_circuits
+Then: uv run --group bench python -m benchmarks.generate_expected  (to get Aer reference distributions)
 """
 from __future__ import annotations
 

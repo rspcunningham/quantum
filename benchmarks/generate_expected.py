@@ -1,6 +1,6 @@
 """Generate expected distributions by running .qasm circuits on Aer.
 
-Run: uv run python benchmarks/generate_expected.py
+Run: uv run --group bench python -m benchmarks.generate_expected
 """
 from __future__ import annotations
 

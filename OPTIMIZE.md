@@ -2,6 +2,8 @@
 
 Self-contained instructions for running the optimization loop on this quantum simulator. This is the only file you need to read before starting work.
 
+Benchmark tooling is repo-local. It is not installed with the `quantum` package; run it through the `bench` dependency group with `python -m benchmarks...`.
+
 ## Philosophy
 
 This is a **general-purpose quantum simulator**. The benchmark suite exists to quantify progress, not to define it. Any optimization must improve general performance across diverse circuit structures with dense output distributions (real-world circuits), not just sparse ones (textbook circuits).
@@ -34,7 +36,7 @@ LOOP FOREVER:
 2. Hypothesize — state what you're changing and why
 3. Implement — edit system.py and/or gates.py
 4. Commit    — git commit (creates revert point)
-5. Benchmark — uv run bench
+5. Benchmark — uv run --group bench python -m benchmarks.run
 6. Record    — read results, append to results.tsv
 7. Decide    — keep (advance) or discard (git reset)
 ```
@@ -43,12 +45,12 @@ LOOP FOREVER:
 
 Read the latest benchmark JSONL to identify where time is spent. The per-case wall times *are* your profile — which cases are slowest, which families dominate the total.
 
-Use `bench-trace` only when you need to go deeper on a specific bottleneck:
+Use `benchmarks.trace` only when you need to go deeper on a specific bottleneck:
 
 ```bash
-uv run bench-trace <case_name> <shots>
-uv run bench-trace random_universal_14 10000
-uv run bench-trace random_universal_14 10000 --no-stack  # smaller trace
+uv run --group bench python -m benchmarks.trace <case_name> <shots>
+uv run --group bench python -m benchmarks.trace random_universal_14 10000
+uv run --group bench python -m benchmarks.trace random_universal_14 10000 --no-stack  # smaller trace
 ```
 
 If 3+ consecutive experiments are discarded, stop and research before the next attempt. Use web search for papers and techniques, study other simulators, question fundamental assumptions.
@@ -77,7 +79,7 @@ Always commit **before** running benchmarks. This is your revert point if the ex
 ### 5. Benchmark
 
 ```bash
-uv run bench
+uv run --group bench python -m benchmarks.run
 ```
 
 The harness runs each circuit at 10K shots and measures wall time. Cases exceeding 10 seconds are aborted (via a native Metal timeout) and excluded from totals. Results are written incrementally to `benchmarks/results/<timestamp>.jsonl` — read this file directly for per-case data.
@@ -88,7 +90,7 @@ The last line of output is a machine-readable summary:
 SUMMARY	<total_seconds>	<completed>/<total>	<fail_count> FAIL
 ```
 
-To regenerate the Aer reference (not part of the loop): `uv run bench-aer`.
+To regenerate the Aer reference (not part of the loop): `uv run --group bench python -m benchmarks.run_aer`.
 
 ### 6. Record
 
@@ -127,9 +129,9 @@ If you keep: the branch advances and you iterate.
 | `native/src/py_module.cpp` | pybind11 bindings — circuit compilation, `run_circuit` entry |
 | `native/src/shaders.metal` | Metal GPU shaders — gate kernels, sampling, histogram |
 | `src/quantum/qasm.py` | QASM 2.0 parser |
-| `benchmarks/run.py` | Benchmark harness (`bench`) — do not modify |
-| `benchmarks/trace.py` | Profiler (`bench-trace`) |
-| `benchmarks/run_aer.py` | Aer reference runner (`bench-aer`) — not part of the loop |
+| `benchmarks/run.py` | Repo-local benchmark harness — do not modify |
+| `benchmarks/trace.py` | Repo-local profiler |
+| `benchmarks/run_aer.py` | Repo-local Aer reference runner — not part of the loop |
 | `benchmarks/cases/` | Benchmark case definitions — do not modify |
 | `benchmarks/circuits/` | QASM circuit files (auto-discovered) |
 | `benchmarks/expected/` | Expected distributions from Aer |

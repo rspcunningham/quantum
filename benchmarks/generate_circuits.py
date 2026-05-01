@@ -1,6 +1,6 @@
 """Generate benchmark circuits as .qasm files using Qiskit.
 
-Run: uv run python benchmarks/generate_circuits.py
+Run: uv run --group bench python -m benchmarks.generate_circuits
 """
 from __future__ import annotations
 

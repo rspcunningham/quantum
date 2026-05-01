@@ -1,34 +1,55 @@
-"""Smoke tests: run core benchmark cases and verify correctness."""
+"""Smoke tests for simulator behavior without benchmark package dependency."""
 
 from __future__ import annotations
 
 import unittest
+from typing import cast
 
-from quantum import run_simulation
-from benchmarks.cases import CORE_CASES
+from quantum import (
+    Circuit,
+    ConditionalGate,
+    CX,
+    Gate,
+    H,
+    Measurement,
+    QuantumRegister,
+    X,
+    measure_all,
+    run_simulation,
+)
 
 
-class CoreCaseTests(unittest.TestCase):
-    pass
+class SimulatorSmokeTests(unittest.TestCase):
+    def test_bell_state_distribution(self):
+        qubits = QuantumRegister(2)
+        q0 = cast(int, qubits[0])
+        q1 = cast(int, qubits[1])
+        circuit = H(q0) + CX(q0, q1) + measure_all(qubits)
 
-
-def _make_test(case_fn):
-    def test(self):
-        case = case_fn()
-        result = run_simulation(case.circuit, 2000, n_qubits=case.n_qubits)
+        result = run_simulation(circuit, 2_000, n_qubits=2, n_bits=2)
         total = sum(result.values())
-        for bitstring, expected_prob in case.expected.items():
-            actual_prob = result.get(bitstring, 0) / total
-            self.assertAlmostEqual(
-                actual_prob, expected_prob, delta=case.tolerance,
-                msg=f"{case.name}: {bitstring} expected {expected_prob:.3f}, got {actual_prob:.3f}",
-            )
-    return test
 
+        self.assertAlmostEqual(result.get("00", 0) / total, 0.5, delta=0.08)
+        self.assertAlmostEqual(result.get("11", 0) / total, 0.5, delta=0.08)
 
-for _case_fn in CORE_CASES:
-    setattr(CoreCaseTests, f"test_{_case_fn.__name__}", _make_test(_case_fn))
+    def test_mid_circuit_feedback(self):
+        qubits = QuantumRegister(2)
+        q0 = cast(int, qubits[0])
+        q1 = cast(int, qubits[1])
+        ops: list[Gate | ConditionalGate | Measurement | Circuit] = []
+        for _ in range(5):
+            ops.append(H(q0))
+            ops.append(Measurement(q0, 0))
+            ops.append(X(q0).if_(0))
+            ops.append(X(q1).if_(1))
+            ops.append(X(q1).if_(1))
+        ops.append(Measurement(q0, 0))
+
+        result = run_simulation(Circuit(ops), 2_000, n_qubits=2, n_bits=1)
+        total = sum(result.values())
+
+        self.assertEqual(result.get("1", 0), total)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()

@@ -12,31 +12,31 @@ description = "Quantum circuit simulator with native Metal runtime for Apple Sil
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.3.4",
-    "rich>=14.2.0",
     "matplotlib>=3.9.2",
     "seaborn>=0.13.2",
-    "qiskit-aer>=0.17.2",
 ]
-
-[project.scripts]
-bench = "benchmarks.run:main"
-bench-trace = "benchmarks.trace:main"
-bench-aer = "benchmarks.run_aer:main"
 
 [tool.scikit-build]
 minimum-version = "0.10"
 cmake.version = ">=3.27"
 build-dir = "build/{wheel_tag}"
-wheel.packages = ["src/quantum", "benchmarks"]
+wheel.packages = ["src/quantum"]
 wheel.py-api = "cp313"
 
 [tool.scikit-build.cmake.define]
 CMAKE_OSX_DEPLOYMENT_TARGET = "13.0"
 
 [tool.basedpyright]
+include = ["src/quantum", "tests"]
+exclude = ["benchmarks", "examples", "build", "dist"]
 reportUnknownMemberType = false
 
 [dependency-groups]
+bench = [
+    "qiskit>=2.3.0",
+    "qiskit-aer>=0.17.2",
+    "rich>=14.2.0",
+]
 dev = [
     "basedpyright>=1.32.1",
 ]
