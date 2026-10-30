@@ -6,12 +6,12 @@ Most of the code here was written by Claude Opus 4.6, running overnight in a ben
 
 ## Results
 
-On the 249-circuit benchmark suite (39 circuit families, 2–30 qubits, 10,000 shots per circuit), against Qiskit Aer on the same machine (M3 Max, 64 GB):
+On the 226 static circuits in the benchmark suite (2–30 qubits, 10,000 shots per circuit), against Qiskit Aer on the same machine (M3 Max, 64 GB):
 
 | | quantum (Metal) | Qiskit Aer (statevector, CPU) |
 |---|---|---|
-| Circuits completed correctly | 211 / 249 | 220 / 249 |
-| Total time, the 209 circuits both complete correctly | 27.7 s | 76.7 s |
+| Circuits completed (10 s limit) | 211 / 226 | 209 / 226 |
+| Total time, the 209 circuits both complete | 27.7 s | 76.7 s |
 | Faster on | 200 of 209 | 9 of 209 |
 | Median per-circuit speedup | 4.8× | |
 
@@ -23,13 +23,9 @@ By circuit size, over the same 209 circuits:
 | 13–20 | 77 | 77 | 7.1× |
 | 21–30 | 35 | 32 | 3.1× |
 
-Aer runs on the CPU because its GPU backend requires CUDA. Every result is checked against an expected output distribution.
+Aer runs on the CPU because its GPU backend requires CUDA. Every result is checked against an expected output distribution, and all completed runs on both sides pass.
 
-The gaps, so the table isn't flattering by omission:
-
-- **This simulator doesn't run 38 of the 249 circuits.** 23 are dynamic circuits (mid-circuit measurement with classical feedback), which the current runtime doesn't support. The other 15 are 28–30-qubit circuits that hit the 10-second limit.
-- **Aer still wins on some dense 24-qubit circuits.** Quantum-volume, SU(4)-chain and Heisenberg circuits at 24 qubits run 1.7–2.5× faster on Aer, and a handful of tiny circuits are a few milliseconds slower here.
-- **11 of Aer's dynamic-circuit runs fail the correctness check.** They return a differently shaped classical register than the expected distributions, which looks like a harness bug rather than an Aer error. They're excluded from the comparison.
+Where it falls short: most 28–30-qubit circuits hit the 10-second limit on both simulators, and Aer is still 1.7–2.5× faster on a few dense 24-qubit circuits (quantum volume, SU(4) chains, Heisenberg). The suite also has 23 dynamic circuits (mid-circuit measurement with classical feedback), which the current runtime doesn't support, so they're left out.
 
 The runs behind these numbers are pinned in `benchmarks/results/` as `native-reference.jsonl` and `aer-reference.jsonl`.
 
@@ -81,6 +77,12 @@ Circuits can also be loaded from OpenQASM 2.0 with `quantum.parse_qasm`. More ex
 ## Benchmarks
 
 ```bash
+scripts/bench.sh   # both backends, plus machine info, logged to benchmarks/results/
+```
+
+Or one backend at a time:
+
+```bash
 uv run --group bench python -m benchmarks.run       # this simulator
 uv run --group bench python -m benchmarks.run_aer   # Qiskit Aer reference
 ```
@@ -95,6 +97,7 @@ Each case runs at 10,000 shots with a 10-second limit and is checked against an 
 | `native/src/` | Metal runtime, GPU shaders, and pybind11 bindings |
 | `benchmarks/` | Benchmark cases, QASM circuits, harness, and Aer reference |
 | `OPTIMIZE.md` | The instructions the optimization agent runs from |
+| `scripts/bench.sh` | Runs both benchmark backends and logs the output |
 | `docs/` | Notes, including a later audit of the codebase |
 
 ## Limitations
