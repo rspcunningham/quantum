@@ -17,6 +17,7 @@ wheels/
 results.tsv
 run.log
 
-# Benchmark results (only the pinned Aer reference is tracked)
+# Benchmark results (only the pinned reference runs behind the README are tracked)
 benchmarks/results/*
 !benchmarks/results/aer-reference.jsonl
+!benchmarks/results/native-reference.jsonl

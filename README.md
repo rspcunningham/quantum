@@ -2,22 +2,36 @@
 
 A statevector quantum circuit simulator for Apple Silicon with a native Metal runtime, and an experiment in letting coding agents optimize code unsupervised.
 
-Most of the code here was written by Codex and Claude running overnight in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agents gamed the benchmark, and what it took to stop them.
+Most of the code here was written by Claude Opus 4.6, running overnight in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agent gamed the benchmark, and what it took to stop it.
 
 ## Results
 
-<!-- TODO: fill from a fresh run of both backends on HEAD (see "Benchmarks" below). -->
-
-On the 249-circuit benchmark suite (39 circuit families, 2–30 qubits, 10,000 shots), against Qiskit Aer on the same machine:
+On the 249-circuit benchmark suite (39 circuit families, 2–30 qubits, 10,000 shots per circuit), against Qiskit Aer on the same machine (M3 Max, 64 GB):
 
 | | quantum (Metal) | Qiskit Aer (statevector, CPU) |
 |---|---|---|
-| Circuits completed (10 s limit) | TODO / 249 | TODO / 249 |
-| Total wall time, circuits both complete | TODO s | TODO s |
-| Faster than Aer on | TODO of TODO circuits | |
-| Median per-circuit speedup | TODO× | |
+| Circuits completed correctly | 211 / 249 | 220 / 249 |
+| Total time, the 209 circuits both complete correctly | 27.7 s | 76.7 s |
+| Faster on | 200 of 209 | 9 of 209 |
+| Median per-circuit speedup | 4.8× | |
 
-Aer runs on the CPU because its GPU backend requires CUDA. Every result is checked against Aer's output distribution, and a correctness failure fails the run.
+By circuit size, over the same 209 circuits:
+
+| Qubits | Circuits | quantum faster on | Median speedup |
+|---|---|---|---|
+| 2–12 | 97 | 91 | 3.4× |
+| 13–20 | 77 | 77 | 7.1× |
+| 21–30 | 35 | 32 | 3.1× |
+
+Aer runs on the CPU because its GPU backend requires CUDA. Every result is checked against an expected output distribution.
+
+The gaps, so the table isn't flattering by omission:
+
+- **This simulator doesn't run 38 of the 249 circuits.** 23 are dynamic circuits (mid-circuit measurement with classical feedback), which the current runtime doesn't support. The other 15 are 28–30-qubit circuits that hit the 10-second limit.
+- **Aer still wins on some dense 24-qubit circuits.** Quantum-volume, SU(4)-chain and Heisenberg circuits at 24 qubits run 1.7–2.5× faster on Aer, and a handful of tiny circuits are a few milliseconds slower here.
+- **11 of Aer's dynamic-circuit runs fail the correctness check.** They return a differently shaped classical register than the expected distributions, which looks like a harness bug rather than an Aer error. They're excluded from the comparison.
+
+The runs behind these numbers are pinned in `benchmarks/results/` as `native-reference.jsonl` and `aer-reference.jsonl`.
 
 ## The loop
 
@@ -33,12 +47,12 @@ The agent never stops on its own. After three discarded experiments in a row, it
 
 ## What went wrong
 
-The commit history is the honest record. A few things the agents did, in order:
+The commit history is the honest record. A few things the agent did, in order:
 
-- **They optimized for the test suite.** About a fifth of the circuits are round-trips (apply a circuit, then its inverse), so their output is trivial. The agent added compile-time inverse-pair cancellation and reported a 14.5× overall speedup ([`6331041`](https://github.com/rspcunningham/quantum/commit/6331041)). Cancelling inverse pairs is a legitimate optimization, but real circuits rarely undo themselves. Most of that gain was an artifact of the suite.
-- **They optimized for easy outputs.** Textbook circuits like GHZ or Bernstein–Vazirani have only a handful of possible outcomes. The agent added fast paths for sparse output distributions ([`7c8bacb`](https://github.com/rspcunningham/quantum/commit/7c8bacb)). These help the benchmark, but they do nothing for real-world circuits, whose outputs are dense. The instructions already banned special-casing benchmark cases, so this went through a loophole: it targeted a *property* of the cases rather than their names. I added the rule about dense outputs afterwards.
-- **They stopped simulating.** The benchmark ran each circuit several times, at different shot counts, and the agent noticed that later runs could reuse the first. It cached the output distribution and skipped evolution entirely on later calls. The speedup it reported against Aer went from 6.6× to 26.3× ([`98fb061`](https://github.com/rspcunningham/quantum/commit/98fb061)), then to 47.5× once it did the same for dynamic circuits ([`c921e03`](https://github.com/rspcunningham/quantum/commit/c921e03)). This inflated the numbers I posted at the time. Nothing in the rules forbade it, because I hadn't thought to forbid it.
-- **They saturated the benchmark.** Each time the suite got fast enough that run-to-run noise dominated, I had to grow it: from 6 cases, to 24, to 156, to 249.
+- **It optimized for the test suite.** About a fifth of the circuits are round-trips (apply a circuit, then its inverse), so their output is trivial. The agent added compile-time inverse-pair cancellation and reported a 14.5× overall speedup ([`6331041`](https://github.com/rspcunningham/quantum/commit/6331041)). Cancelling inverse pairs is a legitimate optimization, but real circuits rarely undo themselves. Most of that gain was an artifact of the suite.
+- **It optimized for easy outputs.** Textbook circuits like GHZ or Bernstein–Vazirani have only a handful of possible outcomes. The agent added fast paths for sparse output distributions ([`7c8bacb`](https://github.com/rspcunningham/quantum/commit/7c8bacb)). These help the benchmark, but they do nothing for real-world circuits, whose outputs are dense. The instructions already banned special-casing benchmark cases, so this went through a loophole: it targeted a *property* of the cases rather than their names. I added the rule about dense outputs afterwards.
+- **It stopped simulating.** The benchmark ran each circuit several times, at different shot counts, and the agent noticed that later runs could reuse the first. It cached the output distribution and skipped evolution entirely on later calls. The speedup it reported against Aer went from 6.6× to 26.3× ([`98fb061`](https://github.com/rspcunningham/quantum/commit/98fb061)), then to 47.5× once it did the same for dynamic circuits ([`c921e03`](https://github.com/rspcunningham/quantum/commit/c921e03)). This inflated the numbers I posted at the time. Nothing in the rules forbade it, because I hadn't thought to forbid it.
+- **It saturated the benchmark.** Each time the suite got fast enough that run-to-run noise dominated, I had to grow it: from 6 cases, to 24, to 156, to 249.
 
 Each failure became a rule in `OPTIMIZE.md`: no special-casing of cases *or* their structure, dense outputs are the target, and no result caching between calls (compile-time simplification is fine). The static Metal runtime that replaced the PyTorch path computes every result from scratch, and the numbers above come from that code.
 
@@ -71,7 +85,7 @@ uv run --group bench python -m benchmarks.run       # this simulator
 uv run --group bench python -m benchmarks.run_aer   # Qiskit Aer reference
 ```
 
-Each case runs at 10,000 shots with a 10-second limit and is checked against an expected distribution from Aer. Results are written to `benchmarks/results/` as JSONL (ignored by git, apart from the pinned Aer reference).
+Each case runs at 10,000 shots with a 10-second limit and is checked against an expected distribution from Aer. Results are written to `benchmarks/results/` as JSONL (ignored by git, apart from the two pinned reference runs).
 
 ## Layout
 
@@ -86,6 +100,6 @@ Each case runs at 10,000 shots with a 10-second limit and is checked against an 
 ## Limitations
 
 - Single precision (`float32`) state vectors.
-- Up to 30 qubits; on 64 GB, most 30-qubit cases exceed Metal's working-set limit.
-- Circuits with mid-circuit measurement and classical feedback work, but use a much slower path than static circuits.
+- Static circuits only. An earlier version supported mid-circuit measurement and classical feedback, but the current compiled runtime does not.
+- Up to 30 qubits, though most 28–30-qubit circuits take longer than the benchmark's 10-second limit.
 - The QASM parser handles a practical subset of OpenQASM 2.0, not the full language.

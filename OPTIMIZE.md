@@ -14,7 +14,7 @@ Think big. Read `results.tsv` to understand what's been tried, what worked, and 
 
 - **Optimization targets**: The simulation engine and native runtime. This includes `src/quantum/system.py`, `src/quantum/gates.py`, `src/quantum/metal_exec.py`, `native/src/*.cpp`, `native/src/*.mm`, `native/src/*.metal`, and `native/src/*.hpp`. The public execution API is `quantum.compile(circuit, ...) -> CompiledCircuit`, followed by `compiled.run(shots, ...)`.
 - **Code quality**: Keep source clean and readable. Prefer structural improvements over micro-hacks. No dead code, no commented-out experiments, no special-case branches for specific benchmark cases. No caching of simulation results or output distributions between calls — the simulator must do the work each time.
-- **Platform constraints**: This runs on Apple Silicon (M3 Ultra, 64 GB). Solutions must be callable from Python and optimized for this hardware. How you achieve that — PyTorch, native code extensions, GPU shaders, anything — is up to you.
+- **Platform constraints**: This runs on Apple Silicon (M3 Max, 64 GB). Solutions must be callable from Python and optimized for this hardware. How you achieve that — PyTorch, native code extensions, GPU shaders, anything — is up to you.
 - **Rebuilding**: After editing any native C++ / Objective-C / Metal source under `native/src/`, you must rebuild before benchmarking: `uv sync --reinstall-package quantum`.
 
 ## Setup
