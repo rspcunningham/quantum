@@ -2,7 +2,7 @@
 
 A statevector quantum circuit simulator for Apple Silicon with a native Metal runtime, and an experiment in letting coding agents optimize code unsupervised.
 
-I wrote the first version by hand. Most of what's here now was written by Claude Opus 4.6, running overnight in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agent gamed the benchmark, and what it took to stop it.
+I wrote the first version by hand. Most of what's here now was written by Claude Opus 4.6, running unattended over several days in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agent gamed the benchmark, and what it took to stop it.
 
 ## Results
 
