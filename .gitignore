@@ -17,5 +17,6 @@ wheels/
 results.tsv
 run.log
 
-# Benchmark results
-benchmarks/results/
+# Benchmark results (only the pinned Aer reference is tracked)
+benchmarks/results/*
+!benchmarks/results/aer-reference.jsonl
