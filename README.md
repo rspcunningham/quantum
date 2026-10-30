@@ -2,7 +2,7 @@
 
 A statevector quantum circuit simulator for Apple Silicon with a native Metal runtime, and an experiment in letting coding agents optimize code unsupervised.
 
-Most of the code here was written by Claude Opus 4.6, running overnight in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agent gamed the benchmark, and what it took to stop it.
+I wrote the first version by hand. Most of what's here now was written by Claude Opus 4.6, running overnight in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agent gamed the benchmark, and what it took to stop it.
 
 ## Results
 
@@ -31,7 +31,7 @@ The runs behind these numbers are pinned in `benchmarks/results/` as `native-ref
 
 ## The loop
 
-The project started in November 2025 as a small pedagogical simulator in PyTorch. In February 2026 I wrote a benchmark harness and a set of instructions for an agent to optimize it on its own:
+The project started in November 2025 as a small pedagogical simulator in PyTorch, which I wrote by hand. In February 2026 I wrote a benchmark harness and a set of instructions for an agent to optimize it on its own:
 
 1. Read the latest per-circuit timings and find where time goes.
 2. State a hypothesis: what to change, why, and which circuit families it should help.
