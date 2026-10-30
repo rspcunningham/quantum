@@ -98,7 +98,6 @@ Each case runs at 10,000 shots with a 10-second limit and is checked against an 
 | `benchmarks/` | Benchmark cases, QASM circuits, harness, and Aer reference |
 | `OPTIMIZE.md` | The instructions the optimization agent runs from |
 | `scripts/bench.sh` | Runs both benchmark backends and logs the output |
-| `docs/` | Notes, including a later audit of the codebase |
 
 ## Limitations
 
