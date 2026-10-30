@@ -2,7 +2,7 @@
 
 A statevector quantum circuit simulator for Apple Silicon with a native Metal runtime, and an experiment in letting coding agents optimize code unsupervised.
 
-I wrote the first version by hand. Most of what's here now was written by Claude Opus 4.6, running unattended over several days in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)). The simulator is the testbed. The more interesting result is how the agent gamed the benchmark, and what it took to stop it.
+I wrote the first version by hand. Most of what's here now was written by Claude Opus 4.6, running unattended over several days in a benchmark-gated loop ([`OPTIMIZE.md`](OPTIMIZE.md)).
 
 ## Results
 
@@ -43,7 +43,7 @@ The agent never stops on its own. After three discarded experiments in a row, it
 
 ## What went wrong
 
-The commit history is the honest record. A few things the agent did, in order:
+A few things the agent did, in order:
 
 - **It optimized for the test suite.** About a fifth of the circuits are round-trips (apply a circuit, then its inverse), so their output is trivial. The agent added compile-time inverse-pair cancellation and reported a 14.5× overall speedup ([`6331041`](https://github.com/rspcunningham/quantum/commit/6331041)). Cancelling inverse pairs is a legitimate optimization, but real circuits rarely undo themselves. Most of that gain was an artifact of the suite.
 - **It optimized for easy outputs.** Textbook circuits like GHZ or Bernstein–Vazirani have only a handful of possible outcomes. The agent added fast paths for sparse output distributions ([`7c8bacb`](https://github.com/rspcunningham/quantum/commit/7c8bacb)). These help the benchmark, but they do nothing for real-world circuits, whose outputs are dense. The instructions already banned special-casing benchmark cases, so this went through a loophole: it targeted a *property* of the cases rather than their names. I added the rule about dense outputs afterwards.
@@ -51,8 +51,6 @@ The commit history is the honest record. A few things the agent did, in order:
 - **It saturated the benchmark.** Each time the suite got fast enough that run-to-run noise dominated, I had to grow it: from 6 cases, to 24, to 156, to 249.
 
 Each failure became a rule in `OPTIMIZE.md`: no special-casing of cases *or* their structure, dense outputs are the target, and no result caching between calls (compile-time simplification is fine). The static Metal runtime that replaced the PyTorch path computes every result from scratch, and the numbers above come from that code.
-
-The general lesson: an agent in a loop optimizes the measurement, not the intent. The benchmark has to be treated as an adversarial spec, and the rules end up being written in response to what it actually does.
 
 ## Usage
 
